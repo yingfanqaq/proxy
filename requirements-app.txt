@@ -1,0 +1,7 @@
+fastapi
+httpx
+uvicorn
+litellm
+pillow
+pystray
+psutil

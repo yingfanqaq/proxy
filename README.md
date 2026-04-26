@@ -7,20 +7,41 @@ This folder contains two standalone local proxy services:
 
 LiteLLM reads `litellm-two-proxy.yaml` and exposes both through OpenAI-compatible and Anthropic-compatible endpoints.
 
-## Start
+## App and Service Manager
+
+The cross-platform manager stores settings in the user config directory, not in `.zshrc`:
+
+- macOS: `~/Library/Application Support/LocalAIProxyStack/config.json`
+- Linux: `~/.config/local-ai-proxy-stack/config.json`
+- Windows: `%APPDATA%\LocalAIProxyStack\config.json`
+
+Start the services from source:
 
 ```sh
 cd /Users/yingfanqaq/mycodelibrary/proxy
-./start_services.sh
+python3 -m proxy_stack start
 ```
 
-Default ports and keys:
+Open the tray app and settings page:
 
 ```sh
-CODEX_PROXY_API_KEY=codex-proxy-local-key
-GEMINI_PROXY_API_KEY=gemini-proxy-local-key
-LITELLM_MASTER_KEY=litellm-local-test-key
+cd /Users/yingfanqaq/mycodelibrary/proxy
+python3 -m proxy_stack tray --start-services --open-settings
+```
 
+Useful manager commands:
+
+```sh
+python3 -m proxy_stack status
+python3 -m proxy_stack restart
+python3 -m proxy_stack env
+python3 -m proxy_stack install-autostart
+python3 -m proxy_stack uninstall-autostart
+```
+
+Default endpoints and keys:
+
+```sh
 OPENAI_BASE_URL=http://127.0.0.1:39121/v1
 OPENAI_API_KEY=codex-proxy-local-key
 
@@ -57,13 +78,37 @@ ANTHROPIC_DEFAULT_SONNET_MODEL=gemini-3-flash
 ANTHROPIC_DEFAULT_OPUS_MODEL=gemini-3.1-pro-preview
 ```
 
-## Logs
+## Auto Start on Login
+
+Use the manager instead of shell startup files:
 
 ```sh
-tail -f /tmp/codex-chat-proxy.log
-tail -f /tmp/gemini-genai-proxy.log
-tail -f /tmp/litellm-two-proxy.log
+python3 -m proxy_stack install-autostart
 ```
+
+This creates a user login item for the current OS:
+
+- macOS: `~/Library/LaunchAgents/com.yingfanqaq.local-ai-proxy-stack.plist`
+- Linux: `~/.config/autostart/com.yingfanqaq.local-ai-proxy-stack.desktop`
+- Windows: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+
+Remove it with:
+
+```sh
+python3 -m proxy_stack uninstall-autostart
+```
+
+## Logs
+
+When started by the cross-platform manager, logs are under the user state directory:
+
+```sh
+tail -f "$HOME/Library/Application Support/LocalAIProxyStack/logs/codex-chat-proxy.log"
+tail -f "$HOME/Library/Application Support/LocalAIProxyStack/logs/gemini-genai-proxy.log"
+tail -f "$HOME/Library/Application Support/LocalAIProxyStack/logs/litellm-two-proxy.log"
+```
+
+On Linux use `~/.local/state/local-ai-proxy-stack/logs/`; on Windows use `%LOCALAPPDATA%\LocalAIProxyStack\logs\`.
 
 ## Health Checks
 
@@ -125,3 +170,7 @@ GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:39122 \
 GEMINI_API_KEY=gemini-proxy-local-key \
 gemini -m gemini-3-flash-preview -p 'Reply exactly OK.' --output-format text
 ```
+
+## Release Builds
+
+Pushing a tag like `v0.1.0` triggers `.github/workflows/release.yml`, which builds macOS, Linux, and Windows zip artifacts with PyInstaller and attaches them to the GitHub release.
