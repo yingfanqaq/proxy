@@ -5,7 +5,7 @@ import os
 import platform
 import shutil
 import sys
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -20,20 +20,20 @@ def user_config_dir() -> Path:
     system = platform_name()
     home = Path.home()
     if system == "darwin":
-        return home / "Library" / "Application Support" / "LocalAIProxyStack"
+        return home / "Library" / "Application Support" / "proxyEverywhere"
     if system == "windows":
-        return Path(os.environ.get("APPDATA", home / "AppData" / "Roaming")) / "LocalAIProxyStack"
-    return Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")) / "local-ai-proxy-stack"
+        return Path(os.environ.get("APPDATA", home / "AppData" / "Roaming")) / "proxyEverywhere"
+    return Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")) / "proxyeverywhere"
 
 
 def user_state_dir() -> Path:
     system = platform_name()
     home = Path.home()
     if system == "darwin":
-        return home / "Library" / "Application Support" / "LocalAIProxyStack"
+        return home / "Library" / "Application Support" / "proxyEverywhere"
     if system == "windows":
-        return Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local")) / "LocalAIProxyStack"
-    return Path(os.environ.get("XDG_STATE_HOME", home / ".local" / "state")) / "local-ai-proxy-stack"
+        return Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local")) / "proxyEverywhere"
+    return Path(os.environ.get("XDG_STATE_HOME", home / ".local" / "state")) / "proxyeverywhere"
 
 
 def bundled_root() -> Path:
@@ -66,24 +66,33 @@ class ProxyConfig:
     host: str = "127.0.0.1"
     codex_port: int = 39121
     gemini_port: int = 39122
+    claude_port: int = 39123
     litellm_port: int = 4000
     settings_port: int = 39200
     codex_proxy_api_key: str = "codex-proxy-local-key"
     gemini_proxy_api_key: str = "gemini-proxy-local-key"
+    claude_proxy_api_key: str = "claude-proxy-local-key"
     litellm_master_key: str = "litellm-local-test-key"
     python_bin: str = ""
     litellm_bin: str = ""
+    claude_bin: str = ""
     project_root: str = ""
     start_services_on_app_launch: bool = True
     open_settings_on_start: bool = False
+    flows: list[dict[str, Any]] = field(default_factory=list)
 
     def normalized(self) -> "ProxyConfig":
         if not self.python_bin:
             self.python_bin = default_python_bin()
         if not self.litellm_bin:
             self.litellm_bin = default_litellm_bin()
+        if not self.claude_bin:
+            self.claude_bin = shutil.which("claude") or "claude"
         if not self.project_root:
             self.project_root = str(bundled_root())
+        from .flows import default_flows, normalized_flows
+
+        self.flows = normalized_flows(self.flows or default_flows())
         return self
 
     @property
@@ -93,6 +102,10 @@ class ProxyConfig:
     @property
     def gemini_base_url(self) -> str:
         return f"http://{self.host}:{self.gemini_port}"
+
+    @property
+    def claude_base_url(self) -> str:
+        return f"http://{self.host}:{self.claude_port}"
 
     @property
     def anthropic_base_url(self) -> str:
@@ -194,6 +207,17 @@ def env_snippets(config: ProxyConfig | None = None) -> dict[str, str]:
                 "export ANTHROPIC_DEFAULT_HAIKU_MODEL=gemini-3.1-flash-lite-preview",
                 "export ANTHROPIC_DEFAULT_SONNET_MODEL=gemini-3-flash",
                 "export ANTHROPIC_DEFAULT_OPUS_MODEL=gemini-3.1-pro-preview",
+            ]
+        ),
+        "anthropic_claude": "\n".join(
+            [
+                "unset ANTHROPIC_AUTH_TOKEN",
+                f"export ANTHROPIC_BASE_URL={cfg.anthropic_base_url}",
+                f"export ANTHROPIC_API_KEY={cfg.litellm_master_key}",
+                "export ANTHROPIC_MODEL=claude-code-sonnet",
+                "export ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-code-haiku",
+                "export ANTHROPIC_DEFAULT_SONNET_MODEL=claude-code-sonnet",
+                "export ANTHROPIC_DEFAULT_OPUS_MODEL=claude-code-opus",
             ]
         ),
     }

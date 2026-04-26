@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
@@ -8,6 +9,7 @@ from urllib.parse import parse_qs
 from . import APP_NAME
 from . import autostart, manager
 from .config import ProxyConfig, env_snippets, load_config, save_config
+from .flow_ui import render_flow_designer
 
 
 def _field(name: str, value: object, label: str, input_type: str = "text") -> str:
@@ -48,7 +50,9 @@ def render_page(message: str = "") -> bytes:
     section {{ background: white; border: 1px solid #d8dee4; border-radius: 8px; padding: 18px; margin: 14px 0; }}
     form.grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px 16px; }}
     label span {{ display: block; font-size: 12px; color: #57606a; margin-bottom: 5px; }}
-    input {{ width: 100%; box-sizing: border-box; border: 1px solid #d0d7de; border-radius: 6px; padding: 8px 10px; font-size: 14px; }}
+    input, textarea {{ width: 100%; box-sizing: border-box; border: 1px solid #d0d7de; border-radius: 6px; padding: 8px 10px; font-size: 14px; }}
+    textarea {{ min-height: 240px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
+    label.wide {{ display: block; margin-top: 14px; }}
     label.check {{ display: block; margin-top: 12px; color: #24292f; }}
     label.check input {{ width: auto; margin-right: 8px; }}
     button {{ border: 1px solid #1f6feb; background: #1f6feb; color: white; border-radius: 6px; padding: 8px 12px; margin: 10px 8px 0 0; cursor: pointer; }}
@@ -58,6 +62,15 @@ def render_page(message: str = "") -> bytes:
     code, pre {{ background: #f6f8fa; border-radius: 6px; }}
     pre {{ padding: 12px; overflow: auto; }}
     .message {{ background: #fff8c5; border: 1px solid #eac54f; border-radius: 6px; padding: 10px; }}
+    .flow-toolbar {{ display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }}
+    .flow-canvas {{ position: relative; height: 620px; overflow: auto; border: 1px solid #d0d7de; border-radius: 8px; background-image: radial-gradient(#d8dee4 1px, transparent 1px); background-size: 18px 18px; margin-bottom: 14px; }}
+    .flow-canvas svg {{ position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }}
+    .flow-node {{ position: absolute; width: 190px; min-height: 58px; border: 1px solid #8aa2ff; border-radius: 8px; background: #fff; box-shadow: 0 6px 18px rgba(31, 35, 40, .08); padding: 10px; cursor: grab; user-select: none; }}
+    .flow-node b {{ display: block; font-size: 12px; color: #57606a; text-transform: uppercase; }}
+    .flow-node span {{ display: block; margin-top: 6px; font-weight: 600; }}
+    .flow-node.source {{ border-color: #2da44e; }}
+    .flow-node.middle {{ border-color: #1f6feb; }}
+    .flow-node.output {{ border-color: #fb8500; }}
   </style>
 </head>
 <body>
@@ -77,16 +90,20 @@ def render_page(message: str = "") -> bytes:
   <section>
     <h2>Settings</h2>
     <form class="grid" method="post" action="/save">
+      <input type="hidden" name="form_kind" value="settings">
       {_field("host", cfg.host, "Host")}
       {_field("codex_port", cfg.codex_port, "Codex proxy port", "number")}
       {_field("gemini_port", cfg.gemini_port, "Gemini proxy port", "number")}
-      {_field("litellm_port", cfg.litellm_port, "LiteLLM / Anthropic port", "number")}
+      {_field("claude_port", cfg.claude_port, "Claude Code proxy port", "number")}
+      {_field("litellm_port", cfg.litellm_port, "Default LiteLLM output port", "number")}
       {_field("settings_port", cfg.settings_port, "Settings page port", "number")}
       {_field("codex_proxy_api_key", cfg.codex_proxy_api_key, "Codex proxy API key")}
       {_field("gemini_proxy_api_key", cfg.gemini_proxy_api_key, "Gemini proxy API key")}
-      {_field("litellm_master_key", cfg.litellm_master_key, "LiteLLM master key")}
+      {_field("claude_proxy_api_key", cfg.claude_proxy_api_key, "Claude Code proxy API key")}
+      {_field("litellm_master_key", cfg.litellm_master_key, "Default LiteLLM master key")}
       {_field("python_bin", cfg.python_bin, "Python executable")}
       {_field("litellm_bin", cfg.litellm_bin, "LiteLLM executable")}
+      {_field("claude_bin", cfg.claude_bin, "Claude executable")}
       {_field("project_root", cfg.project_root, "Project root")}
       <div>
         {_checkbox("start_services_on_app_launch", cfg.start_services_on_app_launch, "Start services when app opens")}
@@ -100,6 +117,8 @@ def render_page(message: str = "") -> bytes:
     </form>
   </section>
 
+{render_flow_designer(cfg)}
+
   <section>
     <h2>Client Environment Snippets</h2>
     <p>These are optional per-shell snippets. The app stores proxy settings outside <code>.zshrc</code>.</p>
@@ -107,6 +126,7 @@ def render_page(message: str = "") -> bytes:
     <h2>Gemini from Gemini proxy</h2><pre>{html.escape(snippets["gemini"])}</pre>
     <h2>Claude Code via Codex models</h2><pre>{html.escape(snippets["anthropic_codex"])}</pre>
     <h2>Claude Code via Gemini models</h2><pre>{html.escape(snippets["anthropic_gemini"])}</pre>
+    <h2>Claude Code via Claude Code login</h2><pre>{html.escape(snippets["anthropic_claude"])}</pre>
   </section>
 </main>
 </body>
@@ -125,26 +145,33 @@ def update_from_form(form: dict[str, list[str]]) -> ProxyConfig:
     cfg.host = str(_form_value(form, "host", cfg.host))
     cfg.codex_port = int(_form_value(form, "codex_port", cfg.codex_port))
     cfg.gemini_port = int(_form_value(form, "gemini_port", cfg.gemini_port))
+    cfg.claude_port = int(_form_value(form, "claude_port", cfg.claude_port))
     cfg.litellm_port = int(_form_value(form, "litellm_port", cfg.litellm_port))
     cfg.settings_port = int(_form_value(form, "settings_port", cfg.settings_port))
     cfg.codex_proxy_api_key = str(_form_value(form, "codex_proxy_api_key", cfg.codex_proxy_api_key))
     cfg.gemini_proxy_api_key = str(_form_value(form, "gemini_proxy_api_key", cfg.gemini_proxy_api_key))
+    cfg.claude_proxy_api_key = str(_form_value(form, "claude_proxy_api_key", cfg.claude_proxy_api_key))
     cfg.litellm_master_key = str(_form_value(form, "litellm_master_key", cfg.litellm_master_key))
     cfg.python_bin = str(_form_value(form, "python_bin", cfg.python_bin))
     cfg.litellm_bin = str(_form_value(form, "litellm_bin", cfg.litellm_bin))
+    cfg.claude_bin = str(_form_value(form, "claude_bin", cfg.claude_bin))
     cfg.project_root = str(_form_value(form, "project_root", cfg.project_root))
-    cfg.start_services_on_app_launch = "start_services_on_app_launch" in form
-    cfg.open_settings_on_start = "open_settings_on_start" in form
+    if "flows_json" in form:
+        cfg.flows = json.loads(form["flows_json"][0])
+    form_kind = form.get("form_kind", ["settings"])[0]
+    if form_kind == "settings":
+        cfg.start_services_on_app_launch = "start_services_on_app_launch" in form
+        cfg.open_settings_on_start = "open_settings_on_start" in form
     save_config(cfg)
-    if "autostart" in form and not autostart.is_installed():
+    if form_kind == "settings" and "autostart" in form and not autostart.is_installed():
         autostart.install()
-    if "autostart" not in form and autostart.is_installed():
+    if form_kind == "settings" and "autostart" not in form and autostart.is_installed():
         autostart.uninstall()
     return cfg
 
 
 class SettingsHandler(BaseHTTPRequestHandler):
-    server_version = "LocalAIProxyStack/1.0"
+    server_version = "proxyEverywhere/0.2"
 
     def _send(self, body: bytes, status: int = 200) -> None:
         self.send_response(status)

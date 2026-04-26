@@ -1,4 +1,4 @@
-"""Local AI proxy stack manager."""
+"""proxyEverywhere manager."""
 
-APP_NAME = "Local AI Proxy Stack"
-APP_ID = "com.yingfanqaq.local-ai-proxy-stack"
+APP_NAME = "proxyEverywhere"
+APP_ID = "com.yingfanqaq.proxyeverywhere"

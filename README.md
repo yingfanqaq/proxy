@@ -1,35 +1,102 @@
-# Two Proxy Services
+# proxyEverywhere
 
-This folder contains two standalone local proxy services:
+proxyEverywhere is a local cross-platform proxy flow manager for AI coding CLIs and API adapters.
 
-- `codex-chat-proxy`: OpenAI-compatible `/v1/chat/completions` and `/v1/responses`, backed by Codex OAuth.
-- `gemini-genai-proxy`: Gemini Developer API compatible `/v1beta`, backed by Gemini CLI OAuth.
+The core idea is no longer a fixed pipeline like `Codex + Gemini -> LiteLLM -> Anthropic`. Instead, each conversion is a flow:
 
-LiteLLM reads `litellm-two-proxy.yaml` and exposes both through OpenAI-compatible and Anthropic-compatible endpoints.
+```text
+Start node -> LiteLLM node -> Output node(s)
+```
 
-## App and Service Manager
+Start nodes can be local proxy services or an external relay endpoint. Output nodes define the API format and port you want to expose.
 
-The cross-platform manager stores settings in the user config directory, not in `.zshrc`:
+## Built-in Start Nodes
 
-- macOS: `~/Library/Application Support/LocalAIProxyStack/config.json`
-- Linux: `~/.config/local-ai-proxy-stack/config.json`
-- Windows: `%APPDATA%\LocalAIProxyStack\config.json`
+- Codex local proxy: exposes OpenAI-compatible `/v1/chat/completions` and `/v1/responses`, backed by Codex OAuth.
+- Gemini local proxy: exposes Gemini Developer API-compatible `/v1beta`, backed by Gemini CLI OAuth.
+- Claude Code local proxy: exposes Anthropic Messages-compatible `/v1/messages`, backed by the logged-in local `claude` CLI.
+- External relay: use an existing `BASE_URL` and API key instead of starting a local source proxy.
 
-Start the services from source:
+## Built-in Middle Node
+
+- LiteLLM is currently the only middle node.
+- Release builds bundle LiteLLM as a Python dependency inside the app, so users should not need to install a separate `litellm` command.
+- Source/development mode can still use a local `litellm` executable if you run from this repository.
+
+## Built-in Output Formats
+
+- Anthropic-compatible endpoint, useful for Claude Code via `ANTHROPIC_BASE_URL`.
+- OpenAI-compatible endpoint, useful for tools expecting `OPENAI_BASE_URL`.
+
+LiteLLM usually exposes both OpenAI-compatible and Anthropic-compatible routes on the same service port; proxyEverywhere still records the intended output format on each flow so the UI and generated snippets stay clear.
+
+## Default Flows
+
+Enabled by default:
+
+- `Codex to Anthropic`: Codex local OpenAI-compatible proxy -> LiteLLM -> Anthropic-compatible output on `4000`.
+- `Gemini to Anthropic`: Gemini local GenAI proxy -> LiteLLM -> Anthropic-compatible output on `4000`.
+- `Claude Code to Anthropic`: Claude Code local Anthropic-compatible proxy -> LiteLLM -> Anthropic-compatible output on `4000`.
+
+Included as a disabled template:
+
+- `Claude Code to OpenAI`: Claude Code local Anthropic-compatible proxy -> LiteLLM -> OpenAI-compatible output on `4001`.
+
+## Ports
+
+Default local source ports:
+
+```sh
+Codex proxy       http://127.0.0.1:39121/v1
+Gemini proxy      http://127.0.0.1:39122
+Claude Code proxy http://127.0.0.1:39123
+Settings page     http://127.0.0.1:39200
+```
+
+Default output port:
+
+```sh
+LiteLLM output    http://127.0.0.1:4000
+```
+
+## Settings and Flow Designer
+
+Open the settings page:
+
+```sh
+http://127.0.0.1:39200
+```
+
+The page includes:
+
+- Service status and logs.
+- Ports, API keys, executable paths, and autostart settings.
+- A Dify-style flow canvas where start, LiteLLM, and output nodes can be moved by dragging.
+- Editable Flow JSON for exact flow definitions.
+- Environment snippets for Claude Code, OpenAI-compatible clients, and Gemini-compatible clients.
+
+## Running From Source
+
+Install Python dependencies:
 
 ```sh
 cd /Users/yingfanqaq/mycodelibrary/proxy
+python3 -m pip install -r requirements-app.txt
+```
+
+Start everything:
+
+```sh
 python3 -m proxy_stack start
 ```
 
 Open the tray app and settings page:
 
 ```sh
-cd /Users/yingfanqaq/mycodelibrary/proxy
 python3 -m proxy_stack tray --start-services --open-settings
 ```
 
-Useful manager commands:
+Useful commands:
 
 ```sh
 python3 -m proxy_stack status
@@ -39,138 +106,74 @@ python3 -m proxy_stack install-autostart
 python3 -m proxy_stack uninstall-autostart
 ```
 
-Default endpoints and keys:
+## Autostart
 
-```sh
-OPENAI_BASE_URL=http://127.0.0.1:39121/v1
-OPENAI_API_KEY=codex-proxy-local-key
+proxyEverywhere creates user-level startup entries:
 
-GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:39122
-GEMINI_API_KEY=gemini-proxy-local-key
+- macOS: `~/Library/LaunchAgents/com.yingfanqaq.proxyeverywhere.plist` plus per-service LaunchAgents.
+- Linux: `~/.config/autostart/com.yingfanqaq.proxyeverywhere.desktop`.
+- Windows: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
-ANTHROPIC_BASE_URL=http://127.0.0.1:4000
-ANTHROPIC_API_KEY=litellm-local-test-key
-```
-
-## Claude Code
-
-Claude Code talks Anthropic Messages API, so point it at LiteLLM, not the lower-level `39121` or `39122` proxy ports. `ANTHROPIC_API_KEY` is the LiteLLM master key.
-
-Codex model aliases exposed to Claude Code:
-
-```sh
-ANTHROPIC_BASE_URL=http://127.0.0.1:4000
-ANTHROPIC_API_KEY=litellm-local-test-key
-ANTHROPIC_MODEL=gpt-5.5
-ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-5.4-mini
-ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-5.4
-ANTHROPIC_DEFAULT_OPUS_MODEL=gpt-5.5
-```
-
-Gemini model aliases exposed to Claude Code:
-
-```sh
-ANTHROPIC_BASE_URL=http://127.0.0.1:4000
-ANTHROPIC_API_KEY=litellm-local-test-key
-ANTHROPIC_MODEL=gemini-3.1-pro-preview
-ANTHROPIC_DEFAULT_HAIKU_MODEL=gemini-3.1-flash-lite-preview
-ANTHROPIC_DEFAULT_SONNET_MODEL=gemini-3-flash
-ANTHROPIC_DEFAULT_OPUS_MODEL=gemini-3.1-pro-preview
-```
-
-## Auto Start on Login
-
-Use the manager instead of shell startup files:
+Install autostart:
 
 ```sh
 python3 -m proxy_stack install-autostart
 ```
 
-This creates a user login item for the current OS:
-
-- macOS: `~/Library/LaunchAgents/com.yingfanqaq.local-ai-proxy-stack.plist`
-- Linux: `~/.config/autostart/com.yingfanqaq.local-ai-proxy-stack.desktop`
-- Windows: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-
-Remove it with:
+Remove autostart:
 
 ```sh
 python3 -m proxy_stack uninstall-autostart
 ```
 
-## Logs
+## Config and Logs
 
-When started by the cross-platform manager, logs are under the user state directory:
+Config paths:
+
+- macOS: `~/Library/Application Support/proxyEverywhere/config.json`
+- Linux: `~/.config/proxyeverywhere/config.json`
+- Windows: `%APPDATA%\proxyEverywhere\config.json`
+
+Log paths:
+
+- macOS: `~/Library/Application Support/proxyEverywhere/logs/`
+- Linux: `~/.local/state/proxyeverywhere/logs/`
+- Windows: `%LOCALAPPDATA%\proxyEverywhere\logs\`
+
+## Client Snippets
+
+Print snippets generated from the current flow config:
 
 ```sh
-tail -f "$HOME/Library/Application Support/LocalAIProxyStack/logs/codex-chat-proxy.log"
-tail -f "$HOME/Library/Application Support/LocalAIProxyStack/logs/gemini-genai-proxy.log"
-tail -f "$HOME/Library/Application Support/LocalAIProxyStack/logs/litellm-two-proxy.log"
+python3 -m proxy_stack env
 ```
 
-On Linux use `~/.local/state/local-ai-proxy-stack/logs/`; on Windows use `%LOCALAPPDATA%\LocalAIProxyStack\logs\`.
-
-## Health Checks
+Claude Code via Codex/Gemini/Claude flows:
 
 ```sh
-curl http://127.0.0.1:39121/health
-curl http://127.0.0.1:39122/health
-curl http://127.0.0.1:4000/health/readiness
+unset ANTHROPIC_AUTH_TOKEN
+export ANTHROPIC_BASE_URL=http://127.0.0.1:4000
+export ANTHROPIC_API_KEY=litellm-local-test-key
+export ANTHROPIC_MODEL=gpt-5.5
 ```
 
-## Smoke Tests
-
-Codex proxy:
+OpenAI-compatible output from a flow can be used with:
 
 ```sh
-curl -sS -H 'Authorization: Bearer codex-proxy-local-key' \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"Reply exactly OK."}],"stream":false}' \
-  http://127.0.0.1:39121/v1/chat/completions
-```
-
-Gemini proxy:
-
-```sh
-curl -sS -H 'x-goog-api-key: gemini-proxy-local-key' \
-  -H 'Content-Type: application/json' \
-  -d '{"contents":[{"role":"user","parts":[{"text":"Reply exactly OK."}]}]}' \
-  'http://127.0.0.1:39122/v1beta/models/gemini-3-flash-preview:generateContent'
-```
-
-LiteLLM Anthropic-compatible route:
-
-```sh
-curl -sS -H 'x-api-key: litellm-local-test-key' \
-  -H 'anthropic-version: 2023-06-01' \
-  -H 'content-type: application/json' \
-  -d '{"model":"gpt-5.5","max_tokens":64,"messages":[{"role":"user","content":"Reply exactly OK."}]}' \
-  http://127.0.0.1:4000/v1/messages
-```
-
-For `codex-cli`, define a custom provider so the CLI really uses the proxy:
-
-```sh
-OPENAI_API_KEY=codex-proxy-local-key codex exec \
-  -c 'model_provider="codex_proxy"' \
-  -c 'model_providers.codex_proxy.name="Codex Proxy"' \
-  -c 'model_providers.codex_proxy.base_url="http://127.0.0.1:39121/v1"' \
-  -c 'model_providers.codex_proxy.env_key="OPENAI_API_KEY"' \
-  -c 'model_providers.codex_proxy.wire_api="responses"' \
-  -c 'model_providers.codex_proxy.requires_openai_auth=false' \
-  --cd /tmp --skip-git-repo-check --sandbox read-only --ephemeral \
-  --model gpt-5.5 \
-  'Reply exactly OK.'
-```
-
-For `gemini-cli`:
-
-```sh
-GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:39122 \
-GEMINI_API_KEY=gemini-proxy-local-key \
-gemini -m gemini-3-flash-preview -p 'Reply exactly OK.' --output-format text
+export OPENAI_BASE_URL=http://127.0.0.1:4001/v1
+export OPENAI_API_KEY=litellm-local-test-key
 ```
 
 ## Release Builds
 
-Pushing a tag like `v0.1.0` triggers `.github/workflows/release.yml`, which builds macOS, Linux, and Windows zip artifacts with PyInstaller and attaches them to the GitHub release.
+Pushing a tag like `v0.2.0` triggers `.github/workflows/release.yml`, which builds macOS, Linux, and Windows zip artifacts with PyInstaller and attaches them to the GitHub release.
+
+The release app bundles:
+
+- proxyEverywhere tray/settings code.
+- Codex, Gemini, and Claude Code local proxy services.
+- LiteLLM and Python runtime dependencies collected by PyInstaller.
+
+It does not bundle the upstream Codex, Gemini, or Claude CLIs themselves; enable a local source node only after that CLI is installed and logged in on the machine.
+
+That means normal users should download the platform-specific zip and run the app, without separately installing LiteLLM.

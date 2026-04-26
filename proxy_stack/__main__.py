@@ -10,7 +10,7 @@ from .config import config_path, env_snippets, load_config, save_config
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(prog="proxy-stack", description=APP_NAME)
+    parser = argparse.ArgumentParser(prog="proxyEverywhere", description=APP_NAME)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("start")
     sub.add_parser("stop")

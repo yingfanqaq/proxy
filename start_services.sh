@@ -3,6 +3,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+if [[ "${PROXY_EVERYWHERE_LEGACY_TMUX:-0}" != "1" ]]; then
+  cd "$ROOT"
+  "$PYTHON_BIN" -m proxy_stack restart
+  "$PYTHON_BIN" -m proxy_stack status
+  exit 0
+fi
+
 CODEX_PROXY_API_KEY="${CODEX_PROXY_API_KEY:-codex-proxy-local-key}"
 GEMINI_PROXY_API_KEY="${GEMINI_PROXY_API_KEY:-gemini-proxy-local-key}"
 LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-litellm-local-test-key}"

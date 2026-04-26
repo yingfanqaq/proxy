@@ -49,7 +49,7 @@ def run_tray(settings_url: str) -> None:
         icon.stop()
 
     icon = pystray.Icon(
-        "local-ai-proxy-stack",
+        "proxyeverywhere",
         _make_icon_image(),
         APP_NAME,
         menu=pystray.Menu(

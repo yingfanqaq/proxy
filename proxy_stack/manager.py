@@ -12,9 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import ProxyConfig, load_config, log_dir, runtime_dir
+from .flows import generate_litellm_config_for_port, litellm_env_for_port, local_providers_used, output_ports
 
 
-SERVICES = ("codex", "gemini", "litellm")
+SOURCE_SERVICES = ("codex", "gemini", "claude")
 
 
 @dataclass
@@ -37,113 +38,40 @@ def pid_path(name: str) -> Path:
     return runtime_dir() / f"{name}.pid"
 
 
+def litellm_service_name(port: int) -> str:
+    return f"litellm_{port}"
+
+
+def litellm_port_from_name(name: str, config: ProxyConfig) -> int:
+    if name.startswith("litellm_"):
+        return int(name.rsplit("_", 1)[1])
+    if name == "litellm":
+        return config.litellm_port
+    raise ValueError(f"Not a LiteLLM service: {name}")
+
+
+def service_names(config: ProxyConfig | None = None) -> tuple[str, ...]:
+    cfg = (config or load_config()).normalized()
+    source_names = [name for name in SOURCE_SERVICES if name in local_providers_used(cfg)]
+    litellm_names = [litellm_service_name(port) for port in output_ports(cfg)]
+    return tuple(source_names + litellm_names)
+
+
 def log_path(name: str) -> Path:
+    if name.startswith("litellm"):
+        if name in ("litellm", "litellm_4000"):
+            return log_dir() / "litellm-two-proxy.log"
+        return log_dir() / f"{name}.log"
     suffix = {
         "codex": "codex-chat-proxy.log",
         "gemini": "gemini-genai-proxy.log",
-        "litellm": "litellm-two-proxy.log",
+        "claude": "claude-code-proxy.log",
     }[name]
     return log_dir() / suffix
 
 
 def generate_litellm_config(config: ProxyConfig) -> Path:
-    path = runtime_dir() / "litellm-two-proxy.generated.yaml"
-    host = config.host
-    codex_base = f"http://{host}:{config.codex_port}/v1"
-    gemini_base = f"http://{host}:{config.gemini_port}/v1beta"
-    content = f"""model_list:
-  - model_name: codex
-    litellm_params:
-      model: openai/gpt-5.5
-      api_base: {codex_base}
-      api_key: os.environ/CODEX_PROXY_API_KEY
-
-  - model_name: gpt-5.5
-    litellm_params:
-      model: openai/gpt-5.5
-      api_base: {codex_base}
-      api_key: os.environ/CODEX_PROXY_API_KEY
-
-  - model_name: gpt-5.4
-    litellm_params:
-      model: openai/gpt-5.4
-      api_base: {codex_base}
-      api_key: os.environ/CODEX_PROXY_API_KEY
-
-  - model_name: gpt-5.4-mini
-    litellm_params:
-      model: openai/gpt-5.4-mini
-      api_base: {codex_base}
-      api_key: os.environ/CODEX_PROXY_API_KEY
-
-  - model_name: gpt-5.3-codex
-    litellm_params:
-      model: openai/gpt-5.3-codex
-      api_base: {codex_base}
-      api_key: os.environ/CODEX_PROXY_API_KEY
-
-  - model_name: gpt-5.2
-    litellm_params:
-      model: openai/gpt-5.2
-      api_base: {codex_base}
-      api_key: os.environ/CODEX_PROXY_API_KEY
-
-  - model_name: gemini
-    litellm_params:
-      model: gemini/gemini-3.1-pro-preview
-      api_base: {gemini_base}
-      api_key: os.environ/GEMINI_PROXY_API_KEY
-
-  - model_name: gemini-3.1-pro-preview
-    litellm_params:
-      model: gemini/gemini-3.1-pro-preview
-      api_base: {gemini_base}
-      api_key: os.environ/GEMINI_PROXY_API_KEY
-
-  - model_name: gemini-3-flash
-    litellm_params:
-      model: gemini/gemini-3-flash-preview
-      api_base: {gemini_base}
-      api_key: os.environ/GEMINI_PROXY_API_KEY
-
-  - model_name: gemini-3-flash-preview
-    litellm_params:
-      model: gemini/gemini-3-flash-preview
-      api_base: {gemini_base}
-      api_key: os.environ/GEMINI_PROXY_API_KEY
-
-  - model_name: gemini-3.1-flash-lite-preview
-    litellm_params:
-      model: gemini/gemini-3.1-flash-lite-preview
-      api_base: {gemini_base}
-      api_key: os.environ/GEMINI_PROXY_API_KEY
-
-  - model_name: gemini-2.5-pro
-    litellm_params:
-      model: gemini/gemini-2.5-pro
-      api_base: {gemini_base}
-      api_key: os.environ/GEMINI_PROXY_API_KEY
-
-  - model_name: gemini-2.5-flash
-    litellm_params:
-      model: gemini/gemini-2.5-flash
-      api_base: {gemini_base}
-      api_key: os.environ/GEMINI_PROXY_API_KEY
-
-  - model_name: gemini-2.5-flash-lite
-    litellm_params:
-      model: gemini/gemini-2.5-flash-lite
-      api_base: {gemini_base}
-      api_key: os.environ/GEMINI_PROXY_API_KEY
-
-general_settings:
-  master_key: os.environ/LITELLM_MASTER_KEY
-
-litellm_settings:
-  drop_params: true
-"""
-    path.write_text(content, encoding="utf-8")
-    return path
+    return generate_litellm_config_for_port(config, config.litellm_port)
 
 
 def _base_env(config: ProxyConfig) -> dict[str, str]:
@@ -194,20 +122,26 @@ def service_spec(name: str, config: ProxyConfig | None = None) -> ServiceSpec:
         )
         command = frozen or [cfg.python_bin, "app.py"]
         return ServiceSpec(name, cfg.gemini_port, f"http://{cfg.host}:{cfg.gemini_port}/health", log_path(name), pid_path(name), cwd, command, env)
-    if name == "litellm":
-        config_path = generate_litellm_config(cfg)
+    if name == "claude":
+        cwd = root / "claude-code-proxy"
         env.update(
             {
-                "CODEX_PROXY_API_KEY": cfg.codex_proxy_api_key,
-                "GEMINI_PROXY_API_KEY": cfg.gemini_proxy_api_key,
-                "LITELLM_MASTER_KEY": cfg.litellm_master_key,
-                "LITELLM_CONFIG": str(config_path),
+                "CLAUDE_PROXY_API_KEY": cfg.claude_proxy_api_key,
+                "CLAUDE_BIN": cfg.claude_bin,
                 "HOST": cfg.host,
-                "PORT": str(cfg.litellm_port),
+                "PORT": str(cfg.claude_port),
+                "PYTHON_BIN": cfg.python_bin,
             }
         )
-        command = frozen or [cfg.litellm_bin, "--config", str(config_path), "--host", cfg.host, "--port", str(cfg.litellm_port)]
-        return ServiceSpec(name, cfg.litellm_port, f"http://{cfg.host}:{cfg.litellm_port}/health/readiness", log_path(name), pid_path(name), root, command, env)
+        command = frozen or [cfg.python_bin, "app.py"]
+        return ServiceSpec(name, cfg.claude_port, f"http://{cfg.host}:{cfg.claude_port}/health", log_path(name), pid_path(name), cwd, command, env)
+    if name.startswith("litellm"):
+        port = litellm_port_from_name(name, cfg)
+        config_path = generate_litellm_config_for_port(cfg, port)
+        env.update(litellm_env_for_port(cfg, port))
+        env.update({"LITELLM_CONFIG": str(config_path), "HOST": cfg.host, "PORT": str(port)})
+        command = frozen or [cfg.litellm_bin, "--config", str(config_path), "--host", cfg.host, "--port", str(port)]
+        return ServiceSpec(name, port, f"http://{cfg.host}:{port}/health/readiness", log_path(name), pid_path(name), root, command, env)
     raise ValueError(f"Unknown service: {name}")
 
 
@@ -250,7 +184,7 @@ def port_open(host: str, port: int) -> bool:
 def status(config: ProxyConfig | None = None) -> dict[str, dict[str, object]]:
     cfg = (config or load_config()).normalized()
     result: dict[str, dict[str, object]] = {}
-    for name in SERVICES:
+    for name in service_names(cfg):
         spec = service_spec(name, cfg)
         pid = read_pid(spec.pid_path)
         alive = bool(pid and pid_alive(pid))
@@ -298,7 +232,8 @@ def start_service(name: str, config: ProxyConfig | None = None) -> dict[str, obj
         domain = f"gui/{os.getuid()}"
         subprocess.run(["launchctl", "bootstrap", domain, str(plist_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["launchctl", "kickstart", "-k", f"{domain}/{label}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        healthy = _wait_for_health(spec.health_url, True)
+        attempts = 100 if name.startswith("litellm") else 40
+        healthy = _wait_for_health(spec.health_url, True, attempts=attempts)
         return {"name": name, "started": healthy, "healthy": healthy, "via": "launchd", "log": str(spec.log_path)}
     spec.log_path.parent.mkdir(parents=True, exist_ok=True)
     spec.pid_path.parent.mkdir(parents=True, exist_ok=True)
@@ -329,8 +264,13 @@ def start_service(name: str, config: ProxyConfig | None = None) -> dict[str, obj
 
 def start_all(config: ProxyConfig | None = None) -> list[dict[str, object]]:
     cfg = (config or load_config()).normalized()
-    results = [start_service("codex", cfg), start_service("gemini", cfg)]
-    results.append(start_service("litellm", cfg))
+    results: list[dict[str, object]] = []
+    for name in service_names(cfg):
+        if not name.startswith("litellm"):
+            results.append(start_service(name, cfg))
+    for name in service_names(cfg):
+        if name.startswith("litellm"):
+            results.append(start_service(name, cfg))
     return results
 
 
@@ -370,7 +310,7 @@ def stop_service(name: str, config: ProxyConfig | None = None) -> dict[str, obje
 
 def stop_all(config: ProxyConfig | None = None) -> list[dict[str, object]]:
     cfg = (config or load_config()).normalized()
-    return [stop_service(name, cfg) for name in reversed(SERVICES)]
+    return [stop_service(name, cfg) for name in reversed(service_names(cfg))]
 
 
 def restart_all(config: ProxyConfig | None = None) -> list[dict[str, object]]:
