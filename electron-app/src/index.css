@@ -93,6 +93,10 @@ html, body, #root {
 .react-flow__handle:hover {
   transform: scale(1.4) !important;
 }
+.react-flow__handle-left:hover,
+.react-flow__handle-right:hover {
+  transform: translate(0, -50%) scale(1.4) !important;
+}
 
 .react-flow__controls-button {
   background-color: var(--bg-card) !important;

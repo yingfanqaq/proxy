@@ -8,6 +8,8 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+const HANDLE_CLASS = "!w-3 !h-3 !bg-[var(--text-secondary)] !border-2 !border-[var(--bg-card)] hover:!bg-[var(--accent)] transition-colors";
+
 const BaseNode = ({ children, title, icon: Icon, selected, type, status }: { children: React.ReactNode, title: string, icon: any, selected?: boolean, type: string, status?: 'online' | 'offline' }) => {
   const iconColor = type === 'input' ? 'text-blue-500' : type === 'transform' ? 'text-purple-500' : 'text-green-500';
   const bgColor = type === 'input' ? 'bg-blue-500/10' : type === 'transform' ? 'bg-purple-500/10' : 'bg-green-500/10';
@@ -48,7 +50,7 @@ const BaseNode = ({ children, title, icon: Icon, selected, type, status }: { chi
 export const InputNode = memo(({ data, selected }: NodeProps) => {
   const Icon = data.subtype === 'proxy' ? Cpu : (data.className === 'Custom API' ? Zap : Globe);
   return (
-    <div className="relative">
+    <div className="relative w-[240px]">
       <BaseNode title={data.label || 'Input Node'} icon={Icon} selected={selected} type="input" status={data.status || 'offline'}>
         <div className="text-[11px] text-[var(--text-secondary)] flex flex-col gap-2.5">
           <div className="flex justify-between items-center">
@@ -68,15 +70,15 @@ export const InputNode = memo(({ data, selected }: NodeProps) => {
           )}
         </div>
       </BaseNode>
-      <Handle type="source" position={Position.Right} className="!w-3 !h-3 !bg-[var(--text-secondary)] !border-2 !border-[var(--bg-card)] hover:!bg-[var(--accent)] !-right-1.5 transition-colors" />
+      <Handle type="source" position={Position.Right} className={cn(HANDLE_CLASS, "!right-[-6px]")} />
     </div>
   );
 });
 
 export const TransformNode = memo(({ data, selected }: NodeProps) => {
   return (
-    <div className="relative">
-      <Handle type="target" position={Position.Left} className="!w-3 !h-3 !bg-[var(--text-secondary)] !border-2 !border-[var(--bg-card)] hover:!bg-[var(--accent)] !-left-1.5 transition-colors" />
+    <div className="relative w-[240px]">
+      <Handle type="target" position={Position.Left} className={cn(HANDLE_CLASS, "!left-[-6px]")} />
       <BaseNode title={data.label || 'Transform'} icon={Repeat} selected={selected} type="transform">
         <div className="text-[11px] text-[var(--text-secondary)] flex flex-col gap-2.5">
           <div className="flex justify-between items-center">
@@ -85,15 +87,15 @@ export const TransformNode = memo(({ data, selected }: NodeProps) => {
           </div>
         </div>
       </BaseNode>
-      <Handle type="source" position={Position.Right} className="!w-3 !h-3 !bg-[var(--text-secondary)] !border-2 !border-[var(--bg-card)] hover:!bg-[var(--accent)] !-right-1.5 transition-colors" />
+      <Handle type="source" position={Position.Right} className={cn(HANDLE_CLASS, "!right-[-6px]")} />
     </div>
   );
 });
 
 export const OutputNode = memo(({ data, selected }: NodeProps) => {
   return (
-    <div className="relative">
-      <Handle type="target" position={Position.Left} className="!w-3 !h-3 !bg-[var(--text-secondary)] !border-2 !border-[var(--bg-card)] hover:!bg-[var(--accent)] !-left-1.5 transition-colors" />
+    <div className="relative w-[240px]">
+      <Handle type="target" position={Position.Left} className={cn(HANDLE_CLASS, "!left-[-6px]")} />
       <BaseNode title={data.label || 'Output Node'} icon={LogOut} selected={selected} type="output">
         <div className="text-[11px] text-[var(--text-secondary)] flex flex-col gap-2.5">
           <div className="flex justify-between items-center">

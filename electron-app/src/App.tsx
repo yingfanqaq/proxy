@@ -5,7 +5,9 @@ import ReactFlow, {
   Controls,
   Connection,
   Edge,
+  EdgeChange,
   Node,
+  NodeChange,
   ReactFlowProvider,
   useNodesState,
   useEdgesState,
@@ -39,6 +41,11 @@ interface Scheme {
   nodes: Node[];
   edges: Edge[];
 }
+
+type GraphSnapshot = {
+  nodes: Node[];
+  edges: Edge[];
+};
 
 const PROVIDER_LABELS: Record<string, string> = {
   codex: 'Codex Proxy',
@@ -693,6 +700,31 @@ function healthyForNode(serviceInfo: any, node: Node): boolean {
   return Boolean(serviceInfo?.healthy) && (!expectedPort || actualPort === expectedPort);
 }
 
+function cloneGraph(nodes: Node[], edges: Edge[]): GraphSnapshot {
+  return {
+    nodes: nodes.map(node => ({
+      ...node,
+      position: { ...node.position },
+      positionAbsolute: node.positionAbsolute ? { ...node.positionAbsolute } : node.positionAbsolute,
+      data: { ...node.data },
+      style: node.style ? { ...node.style } : node.style,
+    })),
+    edges: edges.map(edge => ({
+      ...edge,
+      data: edge.data ? { ...edge.data } : edge.data,
+      style: edge.style ? { ...edge.style } : edge.style,
+      markerEnd: typeof edge.markerEnd === 'object' && edge.markerEnd ? { ...edge.markerEnd } : edge.markerEnd,
+      markerStart: typeof edge.markerStart === 'object' && edge.markerStart ? { ...edge.markerStart } : edge.markerStart,
+    })),
+  };
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tagName = target.tagName.toLowerCase();
+  return target.isContentEditable || tagName === 'input' || tagName === 'textarea' || tagName === 'select';
+}
+
 let nodeIdCounter = 1000;
 const getNextNodeId = () => `node_${nodeIdCounter++}`;
 
@@ -703,12 +735,18 @@ const App = () => {
   const logEndRef = useRef<HTMLDivElement>(null);
   const mappingRefreshSeqRef = useRef<Record<string, number>>({});
   const nodesRef = useRef<Node[]>([]);
+  const edgesRef = useRef<Edge[]>([]);
+  const graphRef = useRef<GraphSnapshot>({ nodes: [], edges: [] });
+  const undoStackRef = useRef<GraphSnapshot[]>([]);
+  const clipboardRef = useRef<GraphSnapshot | null>(null);
+  const skipHistoryRef = useRef(false);
+  const dragHistoryRecordedRef = useRef(false);
 
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [logs, setLogs] = useState<Log[]>([]);
   const [isSaving, setIsSaving] = useState(false);
-  const [nodes, setNodes, onNodesChange] = useNodesState([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const [nodes, setNodes, applyNodesChange] = useNodesState([]);
+  const [edges, setEdges, applyEdgesChange] = useEdgesState([]);
   const [reactFlowInstance, setReactFlowInstance] = useState<any>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [serviceStatus, setServiceStatus] = useState<Record<string, any>>({});
@@ -716,6 +754,8 @@ const App = () => {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
   const [autoLaunch, setAutoLaunch] = useState(false);
   const [config, setConfig] = useState<Record<string, any>>({});
+
+  const closeContextMenu = useCallback(() => setContextMenu(null), []);
 
   useEffect(() => {
     window.electronAPI?.getAutoLaunch().then(setAutoLaunch).catch(() => {});
@@ -734,7 +774,46 @@ const App = () => {
 
   useEffect(() => { document.documentElement.setAttribute('data-theme', theme); }, [theme]);
   useEffect(() => { if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
-  useEffect(() => { nodesRef.current = nodes; }, [nodes]);
+  useEffect(() => {
+    nodesRef.current = nodes;
+    graphRef.current = { nodes, edges: edgesRef.current };
+  }, [nodes]);
+  useEffect(() => {
+    edgesRef.current = edges;
+    graphRef.current = { nodes: nodesRef.current, edges };
+  }, [edges]);
+
+  const pushUndoSnapshot = useCallback(() => {
+    if (skipHistoryRef.current) return;
+    undoStackRef.current = [...undoStackRef.current.slice(-79), cloneGraph(graphRef.current.nodes, graphRef.current.edges)];
+  }, []);
+
+  const undoLast = useCallback(() => {
+    const previous = undoStackRef.current.pop();
+    if (!previous) return;
+    skipHistoryRef.current = true;
+    setSelectedNodeId(null);
+    setNodes(previous.nodes);
+    setEdges(previous.edges);
+    window.setTimeout(() => { skipHistoryRef.current = false; }, 0);
+    addLog('Undo: restored previous canvas state.', 'info');
+  }, [setNodes, setEdges, addLog]);
+
+  const onNodesChange = useCallback((changes: NodeChange[]) => {
+    const shouldRecord = changes.some(change => {
+      if (change.type === 'select' || change.type === 'dimensions') return false;
+      if (change.type === 'position') return !dragHistoryRecordedRef.current && change.dragging !== true;
+      return true;
+    });
+    if (shouldRecord) pushUndoSnapshot();
+    applyNodesChange(changes);
+  }, [applyNodesChange, pushUndoSnapshot]);
+
+  const onEdgesChange = useCallback((changes: EdgeChange[]) => {
+    const shouldRecord = changes.some(change => change.type !== 'select');
+    if (shouldRecord) pushUndoSnapshot();
+    applyEdgesChange(changes);
+  }, [applyEdgesChange, pushUndoSnapshot]);
 
   const loadFromBackend = useCallback(async () => {
     try {
@@ -774,6 +853,8 @@ const App = () => {
 
       setNodes(filledNodes);
       setEdges(scheme.edges);
+      undoStackRef.current = [];
+      setSelectedNodeId(null);
       const healthySvc = Object.values(sts).filter((s: any) => s.healthy).length;
       const totalSvc = Object.keys(sts).length;
       addLog(`Loaded ${flows.length} flow(s), ${filledNodes.length} nodes, ${scheme.edges.length} edges. Services: ${healthySvc}/${totalSvc} healthy.`, 'success');
@@ -789,6 +870,161 @@ const App = () => {
   }, [addLog, setNodes, setEdges]);
 
   useEffect(() => { loadFromBackend(); }, [loadFromBackend]);
+
+  const selectedNodes = useCallback(() => nodesRef.current.filter(node => node.selected), []);
+
+  const deleteNodesById = useCallback((nodeIds: string[], source: 'keyboard' | 'context' = 'keyboard') => {
+    const uniqueIds = [...new Set(nodeIds)];
+    if (uniqueIds.length === 0) return;
+    pushUndoSnapshot();
+    const idSet = new Set(uniqueIds);
+    setEdges(eds => eds.filter(edge => !idSet.has(edge.source) && !idSet.has(edge.target)));
+    setNodes(nds => nds.filter(node => !idSet.has(node.id)));
+    if (selectedNodeId && idSet.has(selectedNodeId)) setSelectedNodeId(null);
+    addLog(`${uniqueIds.length} node${uniqueIds.length === 1 ? '' : 's'} deleted${source === 'context' ? '.' : ' from selection.'}`, 'info');
+    closeContextMenu();
+  }, [setNodes, setEdges, selectedNodeId, addLog, closeContextMenu, pushUndoSnapshot]);
+
+  const copySelectedNodes = useCallback(() => {
+    const pickedNodes = selectedNodes();
+    if (pickedNodes.length === 0) return false;
+    const idSet = new Set(pickedNodes.map(node => node.id));
+    const pickedEdges = edgesRef.current.filter(edge => idSet.has(edge.source) && idSet.has(edge.target));
+    clipboardRef.current = cloneGraph(pickedNodes, pickedEdges);
+    addLog(`Copied ${pickedNodes.length} selected node${pickedNodes.length === 1 ? '' : 's'}.`, 'info');
+    return true;
+  }, [addLog, selectedNodes]);
+
+  const pasteClipboard = useCallback(() => {
+    const clipboard = clipboardRef.current;
+    if (!clipboard || clipboard.nodes.length === 0) return false;
+    pushUndoSnapshot();
+    const idMap = new Map<string, string>();
+    const nextNodes = clipboard.nodes.map(node => {
+      const nextId = getNextNodeId();
+      idMap.set(node.id, nextId);
+      return {
+        ...node,
+        id: nextId,
+        selected: true,
+        position: { x: node.position.x + 40, y: node.position.y + 40 },
+        positionAbsolute: node.positionAbsolute
+          ? { x: node.positionAbsolute.x + 40, y: node.positionAbsolute.y + 40 }
+          : node.positionAbsolute,
+        data: { ...node.data, flowId: undefined },
+      };
+    });
+    const nextEdges: Edge[] = [];
+    clipboard.edges.forEach((edge, index) => {
+      const source = idMap.get(edge.source);
+      const target = idMap.get(edge.target);
+      if (!source || !target) return;
+      nextEdges.push({
+        ...edge,
+        id: `e_${source}_${target}_${Date.now()}_${index}`,
+        source,
+        target,
+        selected: false,
+      });
+    });
+    const nextIds = new Set(nextNodes.map(node => node.id));
+    setNodes(nds => [
+      ...nds.map(node => ({ ...node, selected: false })),
+      ...nextNodes,
+    ]);
+    setEdges(eds => [
+      ...eds.map(edge => ({ ...edge, selected: false })),
+      ...nextEdges,
+    ]);
+    setSelectedNodeId(nextNodes.length === 1 ? nextNodes[0].id : null);
+    addLog(`Pasted ${nextIds.size} node${nextIds.size === 1 ? '' : 's'}.`, 'info');
+    return true;
+  }, [setNodes, setEdges, addLog, pushUndoSnapshot]);
+
+  const duplicateSelectedOrNode = useCallback((nodeId?: string) => {
+    const pickedNodes = selectedNodes();
+    if (pickedNodes.length > 1 || (pickedNodes.length === 1 && (!nodeId || pickedNodes[0].id === nodeId))) {
+      if (!copySelectedNodes()) return;
+      pasteClipboard();
+      return;
+    }
+    if (!nodeId) return;
+    const node = nodesRef.current.find(n => n.id === nodeId);
+    if (!node) return;
+    pushUndoSnapshot();
+    const newId = getNextNodeId();
+    setNodes(nds => [
+      ...nds.map(item => ({ ...item, selected: false })),
+      {
+        ...node,
+        id: newId,
+        position: { x: node.position.x + 40, y: node.position.y + 40 },
+        positionAbsolute: node.positionAbsolute
+          ? { x: node.positionAbsolute.x + 40, y: node.positionAbsolute.y + 40 }
+          : node.positionAbsolute,
+        selected: true,
+        data: { ...node.data, flowId: undefined },
+      },
+    ]);
+    setSelectedNodeId(newId);
+    addLog(`Duplicated ${node.data.label}`, 'info');
+    closeContextMenu();
+  }, [setNodes, selectedNodes, copySelectedNodes, pasteClipboard, pushUndoSnapshot, addLog, closeContextMenu]);
+
+  const recordDragStart = useCallback(() => {
+    if (dragHistoryRecordedRef.current) return;
+    dragHistoryRecordedRef.current = true;
+    pushUndoSnapshot();
+  }, [pushUndoSnapshot]);
+
+  const recordDragStop = useCallback(() => {
+    dragHistoryRecordedRef.current = false;
+  }, []);
+
+  const handleSelectionChange = useCallback(({ nodes: selected }: { nodes: Node[]; edges: Edge[] }) => {
+    if (selected.length === 1) {
+      setSelectedNodeId(selected[0].id);
+    } else if (selected.length !== 1) {
+      setSelectedNodeId(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isEditableTarget(event.target)) return;
+      const modifier = event.metaKey || event.ctrlKey;
+      const key = event.key.toLowerCase();
+      if (modifier && key === 'z') {
+        event.preventDefault();
+        undoLast();
+        return;
+      }
+      if (modifier && key === 'c') {
+        if (copySelectedNodes()) event.preventDefault();
+        return;
+      }
+      if (modifier && key === 'v') {
+        if (pasteClipboard()) event.preventDefault();
+        return;
+      }
+      if (modifier && key === 'd') {
+        const picked = selectedNodes();
+        if (picked.length > 0) {
+          event.preventDefault();
+          duplicateSelectedOrNode();
+        }
+        return;
+      }
+      if (event.key === 'Backspace' || event.key === 'Delete') {
+        const picked = selectedNodes();
+        if (picked.length === 0) return;
+        event.preventDefault();
+        deleteNodesById(picked.map(node => node.id), 'keyboard');
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [undoLast, copySelectedNodes, pasteClipboard, selectedNodes, duplicateSelectedOrNode, deleteNodesById]);
 
   useEffect(() => {
     const interval = setInterval(async () => {
@@ -892,6 +1128,7 @@ const App = () => {
       }
     }
 
+    pushUndoSnapshot();
     setEdges(eds => {
       const newEdges = addEdge({ ...params, animated: true, style: edgeStyle, markerEnd: edgeMarker }, eds);
 
@@ -921,7 +1158,7 @@ const App = () => {
     });
 
     addLog(`Edge connected: ${srcNode?.data.label || params.source} → ${tgtNode?.data.label || params.target}`, 'info');
-  }, [setEdges, addLog, nodes, edges, setNodes]);
+  }, [setEdges, addLog, nodes, edges, setNodes, pushUndoSnapshot]);
 
   const refreshTransformMapping = useCallback((transformId: string, reason: 'select' | 'manual' = 'select') => {
     const transform = nodes.find(n => n.id === transformId && n.type === 'transform');
@@ -970,9 +1207,10 @@ const App = () => {
         : nodeData.port,
     };
 
+    pushUndoSnapshot();
     setNodes(nds => nds.concat({ id: getNextNodeId(), type: nodeData.type, position, data: newData }));
     addLog(`Deployed ${nodeData.type} node "${nodeData.label}" at (${Math.round(position.x)}, ${Math.round(position.y)})`, 'info');
-  }, [reactFlowInstance, setNodes, addLog, nodes, serviceStatus, config]);
+  }, [reactFlowInstance, setNodes, addLog, serviceStatus, config, pushUndoSnapshot]);
 
   const testNodeAvailability = async (nodeId: string) => {
     const node = nodes.find(n => n.id === nodeId);
@@ -1021,9 +1259,10 @@ const App = () => {
     }
   }, [addLog, refreshRuntimeStatus]);
 
-  const updateNodeData = (nodeId: string, newData: any) => {
+  const updateNodeData = useCallback((nodeId: string, newData: any) => {
     const serviceName = serviceNameForData(newData);
     const nextPort = Number(newData?.port);
+    pushUndoSnapshot();
     setNodes(nds => nds.map(n => {
       if (n.id === nodeId) return { ...n, data: newData };
       if (serviceName && serviceNameForInput(n) === serviceName && Number.isInteger(nextPort) && nextPort > 0) {
@@ -1031,7 +1270,7 @@ const App = () => {
       }
       return n;
     }));
-  };
+  }, [setNodes, pushUndoSnapshot]);
 
   const onNodeContextMenu = useCallback((event: React.MouseEvent, node: Node) => {
     event.preventDefault();
@@ -1039,24 +1278,15 @@ const App = () => {
     setSelectedNodeId(node.id);
   }, []);
 
-  const closeContextMenu = useCallback(() => setContextMenu(null), []);
-
   const duplicateNode = useCallback((nodeId: string) => {
-    const node = nodes.find(n => n.id === nodeId);
-    if (!node) return;
-    const newId = getNextNodeId();
-    setNodes(nds => [...nds, { ...node, id: newId, position: { x: node.position.x + 40, y: node.position.y + 40 }, selected: false }]);
-    addLog(`Duplicated ${node.data.label}`, 'info');
-    closeContextMenu();
-  }, [nodes, setNodes, addLog, closeContextMenu]);
+    duplicateSelectedOrNode(nodeId);
+  }, [duplicateSelectedOrNode]);
 
   const deleteNode = useCallback((nodeId: string) => {
-    setEdges(eds => eds.filter(e => e.source !== nodeId && e.target !== nodeId));
-    setNodes(nds => nds.filter(n => n.id !== nodeId));
-    if (selectedNodeId === nodeId) setSelectedNodeId(null);
-    addLog('Node deleted.', 'info');
-    closeContextMenu();
-  }, [setNodes, setEdges, selectedNodeId, addLog, closeContextMenu]);
+    const picked = selectedNodes();
+    const ids = picked.some(node => node.id === nodeId) ? picked.map(node => node.id) : [nodeId];
+    deleteNodesById(ids, 'context');
+  }, [deleteNodesById, selectedNodes]);
 
   const renameNode = useCallback((nodeId: string) => {
     setSelectedNodeId(nodeId);
@@ -1150,8 +1380,18 @@ const App = () => {
               onDrop={onDrop} onDragOver={onDragOver}
               onNodeClick={handleNodeClick}
               onNodeContextMenu={onNodeContextMenu}
+              onNodeDragStart={recordDragStart}
+              onNodeDragStop={recordDragStop}
+              onSelectionDragStart={recordDragStart}
+              onSelectionDragStop={recordDragStop}
+              onSelectionChange={handleSelectionChange}
               onPaneClick={() => { setSelectedNodeId(null); closeContextMenu(); }}
               nodeTypes={nodeTypes} fitView snapToGrid snapGrid={[20, 20]}
+              selectionOnDrag
+              panOnDrag={[1]}
+              panOnScroll
+              deleteKeyCode={null}
+              proOptions={{ hideAttribution: true }}
             >
               <Background color="var(--border-main)" gap={20} size={1} />
               <Controls className="!bg-[var(--bg-card)] !border-[var(--border-main)] !fill-[var(--text-primary)] !shadow-none !rounded-xl !overflow-hidden" />
