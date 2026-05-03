@@ -1,0 +1,123 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Default Dark Theme Variables */
+  --bg-main: #0a0a0a;
+  --bg-sidebar: #121212;
+  --bg-card: #1a1a1a;
+  --border-main: rgba(255, 255, 255, 0.1);
+  --text-primary: #f3f4f6;
+  --text-secondary: #9ca3af;
+  --accent: #2e66ff;
+  --accent-soft: rgba(46, 102, 255, 0.1);
+  --log-bg: #121212;
+}
+
+[data-theme='light'] {
+  /* Cloud Theme Variables (White/Yellow) */
+  --bg-main: #fbf9f1;
+  --bg-sidebar: #f3f0e1;
+  --bg-card: #ffffff;
+  --border-main: rgba(0, 0, 0, 0.08);
+  --text-primary: #2d2a24;
+  --text-secondary: #78716c;
+  --accent: #d97706; /* Golden Yellow */
+  --accent-soft: rgba(217, 119, 6, 0.08);
+  --log-bg: #efead8;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg-main);
+  color: var(--text-primary);
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+* {
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.drag-region {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+.context-menu {
+  animation: ctx-in 0.12s ease-out;
+}
+@keyframes ctx-in {
+  from { opacity: 0; transform: scale(0.95) translateY(-4px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.react-flow__pane {
+  background-color: var(--bg-main);
+}
+
+.react-flow__edge-path {
+  transition: stroke 0.2s ease, stroke-width 0.2s ease;
+}
+.react-flow__edge:hover .react-flow__edge-path {
+  stroke-width: 3;
+  filter: drop-shadow(0 0 6px var(--accent));
+}
+
+.react-flow__node {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  box-shadow: none !important;
+  transition: transform 0.15s ease, filter 0.2s ease !important;
+}
+.react-flow__node:hover {
+  filter: brightness(1.05);
+}
+
+.react-flow__node.selected {
+  box-shadow: none !important;
+}
+
+.react-flow__handle {
+  transition: transform 0.15s ease, background-color 0.15s ease !important;
+}
+.react-flow__handle:hover {
+  transform: scale(1.4) !important;
+}
+
+.react-flow__controls-button {
+  background-color: var(--bg-card) !important;
+  border-color: var(--border-main) !important;
+  fill: var(--text-primary) !important;
+}
+
+.react-flow__controls-button:hover {
+  background-color: var(--accent-soft) !important;
+}
+
+/* Fix for potential scrollbar issues in logs */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: var(--border-main);
+  border-radius: 10px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}

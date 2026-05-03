@@ -8,6 +8,7 @@ import platform
 import re
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -67,7 +68,13 @@ MODEL_IDS = [
     if item.strip()
 ]
 
-app = FastAPI(title=APP_NAME)
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    yield
+    await http_client.aclose()
+
+
+app = FastAPI(title=APP_NAME, lifespan=lifespan)
 http_client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0))
 credential_lock = asyncio.Lock()
 context_lock = asyncio.Lock()
@@ -308,10 +315,6 @@ def unwrap_code_assist(payload: Any) -> Any:
     return payload
 
 
-def parse_sse_payloads() -> tuple[list[str], str | None]:
-    return [], None
-
-
 async def upstream_headers() -> dict[str, str]:
     return {
         "Authorization": f"Bearer {await access_token()}",
@@ -435,11 +438,6 @@ async def count_tokens(model_name: str, request: Request) -> Response:
     if isinstance(body.get("systemInstruction"), dict):
         count_payload["request"]["systemInstruction"] = body["systemInstruction"]
     return await post_code_assist("countTokens", count_payload)
-
-
-@app.on_event("shutdown")
-async def shutdown() -> None:
-    await http_client.aclose()
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -79,7 +80,16 @@ def detect_codex_client_version() -> str:
     return DEFAULT_CODEX_CLIENT_VERSION
 
 
-CODEX_CLIENT_VERSION = detect_codex_client_version()
+CODEX_CLIENT_VERSION: str | None = None
+
+
+def codex_client_version() -> str:
+    global CODEX_CLIENT_VERSION
+    if CODEX_CLIENT_VERSION is None:
+        CODEX_CLIENT_VERSION = detect_codex_client_version()
+    return CODEX_CLIENT_VERSION
+
+
 AUTH_PATH = Path(env("CODEX_AUTH_PATH", str(Path.home() / ".codex" / "auth.json"))).expanduser()
 MODEL_IDS = [
     item.strip()
@@ -87,7 +97,13 @@ MODEL_IDS = [
     if item.strip()
 ]
 
-app = FastAPI(title=APP_NAME)
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    yield
+    await http_client.aclose()
+
+
+app = FastAPI(title=APP_NAME, lifespan=lifespan)
 http_client = httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=30.0))
 credential_lock = asyncio.Lock()
 
@@ -558,10 +574,10 @@ async def upstream_headers(request: Request) -> dict[str, str]:
         "Accept": "text/event-stream",
         "OpenAI-Beta": "responses=experimental",
         "originator": "codex_cli_rs",
-        "version": CODEX_CLIENT_VERSION,
+        "version": codex_client_version(),
         "session_id": request.headers.get("session_id") or str(uuid.uuid4()),
         "conversation_id": request.headers.get("conversation_id") or str(uuid.uuid4()),
-        "User-Agent": f"codex_cli_rs/{CODEX_CLIENT_VERSION}",
+        "User-Agent": f"codex_cli_rs/{codex_client_version()}",
     }
     if account:
         headers["chatgpt-account-id"] = account
@@ -606,7 +622,7 @@ async def sse_events(response: httpx.Response):
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    return {"status": "ok", "service": APP_NAME, "models": MODEL_IDS, "codex_client_version": CODEX_CLIENT_VERSION}
+    return {"status": "ok", "service": APP_NAME, "models": MODEL_IDS, "codex_client_version": codex_client_version()}
 
 
 @app.get("/v1/models")
@@ -760,11 +776,6 @@ async def responses_endpoint(request: Request) -> Response:
     if error_payload is not None:
         return JSONResponse({"error": error_payload}, status_code=400)
     return JSONResponse({"error": {"message": "No response returned from Codex upstream"}}, status_code=502)
-
-
-@app.on_event("shutdown")
-async def shutdown() -> None:
-    await http_client.aclose()
 
 
 if __name__ == "__main__":

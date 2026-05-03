@@ -9,6 +9,11 @@ def main() -> None:
 
         service_main(sys.argv[2:])
         return
+    if len(sys.argv) > 1:
+        from proxy_stack.__main__ import main as cli_main
+
+        cli_main(sys.argv[1:])
+        return
     from proxy_stack.tray_app import main as tray_main
 
     tray_main(sys.argv[1:])

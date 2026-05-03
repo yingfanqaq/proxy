@@ -88,7 +88,9 @@ class ProxyConfig:
             self.litellm_bin = default_litellm_bin()
         if not self.claude_bin:
             self.claude_bin = shutil.which("claude") or "claude"
-        if not self.project_root:
+        if getattr(sys, "frozen", False):
+            self.project_root = str(bundled_root())
+        elif not self.project_root:
             self.project_root = str(bundled_root())
         from .flows import default_flows, normalized_flows
 

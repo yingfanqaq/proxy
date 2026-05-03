@@ -17,6 +17,7 @@ service.env
 .venv/
 venv/
 env/
+node_modules/
 runtime/
 
 auth.json

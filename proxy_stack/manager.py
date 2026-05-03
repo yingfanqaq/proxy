@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -183,13 +184,15 @@ def port_open(host: str, port: int) -> bool:
 
 def status(config: ProxyConfig | None = None) -> dict[str, dict[str, object]]:
     cfg = (config or load_config()).normalized()
+    names = service_names(cfg)
     result: dict[str, dict[str, object]] = {}
-    for name in service_names(cfg):
+
+    def _check(name: str) -> tuple[str, dict[str, object]]:
         spec = service_spec(name, cfg)
         pid = read_pid(spec.pid_path)
         alive = bool(pid and pid_alive(pid))
         healthy = health_ok(spec.health_url)
-        result[name] = {
+        return name, {
             "pid": pid,
             "alive": alive,
             "healthy": healthy,
@@ -198,6 +201,10 @@ def status(config: ProxyConfig | None = None) -> dict[str, dict[str, object]]:
             "log": str(spec.log_path),
             "pid_file": str(spec.pid_path),
         }
+
+    with ThreadPoolExecutor(max_workers=len(names) or 1) as pool:
+        for name, info in pool.map(lambda n: _check(n), names):
+            result[name] = info
     return result
 
 
@@ -242,6 +249,8 @@ def start_service(name: str, config: ProxyConfig | None = None) -> dict[str, obj
     popen_kwargs: dict[str, object] = {}
     if os.name == "nt":
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+    else:
+        popen_kwargs["start_new_session"] = True
     process = subprocess.Popen(
         spec.command,
         cwd=str(spec.cwd),
@@ -253,7 +262,8 @@ def start_service(name: str, config: ProxyConfig | None = None) -> dict[str, obj
         **popen_kwargs,
     )
     spec.pid_path.write_text(str(process.pid), encoding="utf-8")
-    for _ in range(30):
+    attempts = 100 if name.startswith("litellm") else 30
+    for _ in range(attempts):
         if health_ok(spec.health_url, timeout=0.5):
             return {"name": name, "started": True, "pid": process.pid, "healthy": True, "log": str(spec.log_path)}
         if process.poll() is not None:
@@ -264,13 +274,23 @@ def start_service(name: str, config: ProxyConfig | None = None) -> dict[str, obj
 
 def start_all(config: ProxyConfig | None = None) -> list[dict[str, object]]:
     cfg = (config or load_config()).normalized()
+    names = service_names(cfg)
+    source_names = [n for n in names if not n.startswith("litellm")]
+    litellm_names = [n for n in names if n.startswith("litellm")]
     results: list[dict[str, object]] = []
-    for name in service_names(cfg):
-        if not name.startswith("litellm"):
-            results.append(start_service(name, cfg))
-    for name in service_names(cfg):
-        if name.startswith("litellm"):
-            results.append(start_service(name, cfg))
+
+    def _start(name: str) -> dict[str, object]:
+        try:
+            return start_service(name, cfg)
+        except Exception as exc:
+            return {"name": name, "started": False, "healthy": False, "error": str(exc)}
+
+    if source_names:
+        with ThreadPoolExecutor(max_workers=len(source_names)) as pool:
+            results.extend(pool.map(_start, source_names))
+    if litellm_names:
+        with ThreadPoolExecutor(max_workers=len(litellm_names)) as pool:
+            results.extend(pool.map(_start, litellm_names))
     return results
 
 
@@ -310,7 +330,18 @@ def stop_service(name: str, config: ProxyConfig | None = None) -> dict[str, obje
 
 def stop_all(config: ProxyConfig | None = None) -> list[dict[str, object]]:
     cfg = (config or load_config()).normalized()
-    return [stop_service(name, cfg) for name in reversed(service_names(cfg))]
+    names = list(reversed(service_names(cfg)))
+    if not names:
+        return []
+
+    def _stop(name: str) -> dict[str, object]:
+        try:
+            return stop_service(name, cfg)
+        except Exception as exc:
+            return {"name": name, "stopped": False, "error": str(exc)}
+
+    with ThreadPoolExecutor(max_workers=len(names)) as pool:
+        return list(pool.map(_stop, names))
 
 
 def restart_all(config: ProxyConfig | None = None) -> list[dict[str, object]]:
