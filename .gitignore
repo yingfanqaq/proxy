@@ -33,3 +33,4 @@ oauth_creds.json
 build/
 dist/
 *.spec
+electron-app/renderer/

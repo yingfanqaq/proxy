@@ -66,6 +66,11 @@ const LOCAL_PROVIDER_PORTS: Record<string, number> = {
   gemini: 39122,
   claude: 39123,
 };
+const LOCAL_PROVIDER_CONFIG_KEYS: Record<string, string> = {
+  codex: 'codex_port',
+  gemini: 'gemini_port',
+  claude: 'claude_port',
+};
 
 const FALLBACK_PROXY_MODELS: Record<string, string[]> = {
   codex: ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5.2'],
@@ -134,6 +139,15 @@ function formatFromProtocol(protocol: string | undefined): string {
   return 'openai';
 }
 
+function configuredLocalPort(config: Record<string, any> | undefined, provider: string, runtimePort?: number): number {
+  const configKey = LOCAL_PROVIDER_CONFIG_KEYS[provider];
+  const configured = configKey ? Number(config?.[configKey]) : 0;
+  if (Number.isInteger(configured) && configured > 0) return configured;
+  const runtime = Number(runtimePort);
+  if (Number.isInteger(runtime) && runtime > 0) return runtime;
+  return LOCAL_PROVIDER_PORTS[provider] || 0;
+}
+
 function inferLocalProvider(data: any): string {
   const raw = String(data.provider || '').toLowerCase();
   if (raw in LOCAL_PROVIDER_PORTS) return raw;
@@ -195,6 +209,12 @@ function descriptorFromNode(node: Node): SourceDescriptor {
 function serviceNameForInput(node: Node): string | null {
   const desc = descriptorFromNode(node);
   return desc.subtype === 'proxy' && desc.provider in LOCAL_PROVIDER_PORTS ? desc.provider : null;
+}
+
+function serviceNameForData(data: any): string | null {
+  if (data?.subtype !== 'proxy') return null;
+  const provider = inferLocalProvider(data);
+  return provider in LOCAL_PROVIDER_PORTS ? provider : null;
 }
 
 function outputFormatFromNode(node: Node): string {
@@ -443,9 +463,34 @@ async function nodesWithFreshMappings(allNodes: Node[], allEdges: Edge[]): Promi
 
 function graphIssues(allNodes: Node[], allEdges: Edge[]): string[] {
   const issues: string[] = [];
+  const localPortsByProvider = new Map<string, Set<number>>();
+  const providersByPort = new Map<number, Set<string>>();
+
   for (const input of allNodes.filter(n => n.type === 'input')) {
     if (!allEdges.some(e => e.source === input.id)) {
       issues.push(`Input [${input.data?.label || input.id}] has no LiteLLM target.`);
+    }
+    const serviceName = serviceNameForInput(input);
+    if (serviceName) {
+      const port = Number(input.data?.port);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        issues.push(`Input [${input.data?.label || input.id}] has an invalid proxy port.`);
+      } else {
+        if (!localPortsByProvider.has(serviceName)) localPortsByProvider.set(serviceName, new Set());
+        localPortsByProvider.get(serviceName)!.add(port);
+        if (!providersByPort.has(port)) providersByPort.set(port, new Set());
+        providersByPort.get(port)!.add(serviceName);
+      }
+    }
+  }
+  for (const [provider, ports] of localPortsByProvider.entries()) {
+    if (ports.size > 1) {
+      issues.push(`${PROVIDER_LABELS[provider] || provider} nodes must use one shared port: ${[...ports].join(', ')}.`);
+    }
+  }
+  for (const [port, providers] of providersByPort.entries()) {
+    if (providers.size > 1) {
+      issues.push(`Local proxy port ${port} is shared by multiple services: ${[...providers].map(p => PROVIDER_LABELS[p] || p).join(', ')}.`);
     }
   }
   for (const transform of allNodes.filter(n => n.type === 'transform')) {
@@ -466,7 +511,7 @@ function graphIssues(allNodes: Node[], allEdges: Edge[]): string[] {
   return [...new Set(issues)];
 }
 
-function flowsToScheme(flows: any[], serviceStatus: Record<string, any>): Scheme {
+function flowsToScheme(flows: any[], serviceStatus: Record<string, any>, config: Record<string, any> = {}): Scheme {
   const nodes: Node[] = [];
   const edges: Edge[] = [];
   let nodeId = 0;
@@ -500,7 +545,12 @@ function flowsToScheme(flows: any[], serviceStatus: Record<string, any>): Scheme
       const source = flow.source || {};
       const srcPos = flow.layout?.source || { x: 60, y: 90 + nodeId * 140 };
       const srcId = `node_${nodeId++}`;
-      const healthy = desc.subtype === 'proxy' ? (serviceStatus[desc.provider]?.healthy ?? false) : false;
+      const sourcePort = desc.subtype === 'proxy'
+        ? configuredLocalPort(config, desc.provider, serviceStatus[desc.provider]?.port)
+        : undefined;
+      const healthy = desc.subtype === 'proxy'
+        ? Boolean(serviceStatus[desc.provider]?.healthy) && Number(serviceStatus[desc.provider]?.port) === Number(sourcePort)
+        : false;
       const protocol = desc.subtype === 'proxy'
         ? (PROVIDER_PROTOCOLS[desc.provider] || 'Custom')
         : (desc.provider === 'anthropic' ? 'Anthropic' : desc.provider === 'gemini' ? 'Gemini' : 'OpenAI');
@@ -514,7 +564,7 @@ function flowsToScheme(flows: any[], serviceStatus: Record<string, any>): Scheme
           className: desc.label,
           subtype: desc.subtype,
           protocol,
-          port: desc.subtype === 'proxy' ? (serviceStatus[desc.provider]?.port || LOCAL_PROVIDER_PORTS[desc.provider]) : undefined,
+          port: sourcePort,
           baseUrl: source.base_url || source.baseUrl || desc.baseUrl,
           apiKey: source.api_key || source.apiKey || '',
           status: healthy ? 'online' : 'offline',
@@ -619,6 +669,30 @@ function schemeToFlows(nodes: Node[], edges: Edge[], originalFlows: any[]): any[
   return flows;
 }
 
+function configPortsFromNodes(allNodes: Node[]): Record<string, number> {
+  const updates: Record<string, number> = {};
+  for (const node of allNodes) {
+    if (node.type !== 'input') continue;
+    const serviceName = serviceNameForInput(node);
+    const configKey = serviceName ? LOCAL_PROVIDER_CONFIG_KEYS[serviceName] : undefined;
+    const port = Number(node.data?.port);
+    if (configKey && Number.isInteger(port) && port > 0) {
+      updates[configKey] = port;
+    }
+  }
+  return updates;
+}
+
+function mergeConfigPorts(config: Record<string, any>, allNodes: Node[]): Record<string, any> {
+  return { ...config, ...configPortsFromNodes(allNodes) };
+}
+
+function healthyForNode(serviceInfo: any, node: Node): boolean {
+  const expectedPort = Number(node.data?.port);
+  const actualPort = Number(serviceInfo?.port);
+  return Boolean(serviceInfo?.healthy) && (!expectedPort || actualPort === expectedPort);
+}
+
 let nodeIdCounter = 1000;
 const getNextNodeId = () => `node_${nodeIdCounter++}`;
 
@@ -628,6 +702,7 @@ const App = () => {
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
   const mappingRefreshSeqRef = useRef<Record<string, number>>({});
+  const nodesRef = useRef<Node[]>([]);
 
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [logs, setLogs] = useState<Log[]>([]);
@@ -659,14 +734,17 @@ const App = () => {
 
   useEffect(() => { document.documentElement.setAttribute('data-theme', theme); }, [theme]);
   useEffect(() => { if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
+  useEffect(() => { nodesRef.current = nodes; }, [nodes]);
 
   const loadFromBackend = useCallback(async () => {
     try {
       addLog('Connecting to backend API at 127.0.0.1:39201...', 'info');
-      const [flows, sts] = await Promise.all([api.fetchFlows(), api.fetchStatus()]);
+      const [flows, sts, cfg] = await Promise.all([api.fetchFlows(), api.fetchStatus(), api.fetchConfig()]);
+      const mergedCfg = mergeConfigPorts(cfg, nodesRef.current);
       setServiceStatus(sts);
+      setConfig(mergedCfg);
       setOriginalFlows(flows);
-      const scheme = flowsToScheme(flows, sts);
+      const scheme = flowsToScheme(flows, sts, mergedCfg);
 
       const providers = new Set(
         scheme.nodes
@@ -721,7 +799,7 @@ const App = () => {
           if (n.type !== 'input') return n;
       const serviceName = serviceNameForInput(n);
       if (!serviceName || !sts[serviceName]) return n;
-      const healthy = sts[serviceName].healthy;
+      const healthy = healthyForNode(sts[serviceName], n);
       return { ...n, data: { ...n.data, status: healthy ? 'online' : 'offline' } };
         }));
       } catch {}
@@ -743,7 +821,13 @@ const App = () => {
         throw new Error(`Graph has ${issues.length} structural issue(s)`);
       }
       const flows = schemeToFlows(freshNodes, edges, originalFlows);
+      const portUpdates = configPortsFromNodes(freshNodes);
       addLog(`Saving ${flows.length} flow(s) with ${freshNodes.length} nodes, ${edges.length} edges...`, 'info');
+      if (Object.keys(portUpdates).length > 0) {
+        await api.updateConfig(portUpdates);
+        setConfig(prev => ({ ...prev, ...portUpdates }));
+        addLog(`Updated local proxy port config: ${Object.entries(portUpdates).map(([key, value]) => `${key}=${value}`).join(', ')}.`, 'info');
+      }
       await api.saveFlows(flows);
       setOriginalFlows(flows);
       addLog(`Configuration saved successfully. ${flows.map(f => f.id).join(', ')}`, 'success');
@@ -779,7 +863,7 @@ const App = () => {
         if (n.type !== 'input') return n;
         const serviceName = serviceNameForInput(n);
         if (!serviceName || !freshStatus[serviceName]) return n;
-        return { ...n, data: { ...n.data, status: freshStatus[serviceName].healthy ? 'online' : 'offline' } };
+        return { ...n, data: { ...n.data, status: healthyForNode(freshStatus[serviceName], n) ? 'online' : 'offline' } };
       }));
       addLog('Runtime validation: checking service health and LiteLLM model routes...', 'info');
       const result = await api.validateFlows();
@@ -880,15 +964,15 @@ const App = () => {
     const serviceInfo = serviceName ? serviceStatus[serviceName] : null;
     const newData = {
       ...nodeData,
-      status: serviceInfo?.healthy ? 'online' : 'offline',
+      status: serviceInfo?.healthy && Number(serviceInfo?.port) === Number(configuredLocalPort(config, nodeData.provider, serviceInfo?.port)) ? 'online' : 'offline',
       port: nodeData.type === 'input' && nodeData.subtype === 'proxy'
-        ? (serviceInfo?.port || nodeData.port || LOCAL_PROVIDER_PORTS[nodeData.provider] || 39121)
+        ? configuredLocalPort(config, nodeData.provider, serviceInfo?.port) || nodeData.port || 39121
         : nodeData.port,
     };
 
     setNodes(nds => nds.concat({ id: getNextNodeId(), type: nodeData.type, position, data: newData }));
     addLog(`Deployed ${nodeData.type} node "${nodeData.label}" at (${Math.round(position.x)}, ${Math.round(position.y)})`, 'info');
-  }, [reactFlowInstance, setNodes, addLog, nodes]);
+  }, [reactFlowInstance, setNodes, addLog, nodes, serviceStatus, config]);
 
   const testNodeAvailability = async (nodeId: string) => {
     const node = nodes.find(n => n.id === nodeId);
@@ -898,7 +982,7 @@ const App = () => {
       const sts = await api.fetchStatus();
       setServiceStatus(sts);
       const svcInfo = serviceName ? sts[serviceName] : null;
-      const isOnline = svcInfo?.healthy ?? false;
+      const isOnline = node ? healthyForNode(svcInfo, node) : false;
       setNodes(nds => nds.map(n => n.id === nodeId ? { ...n, data: { ...n.data, status: isOnline ? 'online' : 'offline' } } : n));
       if (isOnline) {
         addLog(`${node?.data.label} is ONLINE — port ${svcInfo?.port}, pid ${svcInfo?.pid || 'external/launchd'}`, 'success');
@@ -917,7 +1001,7 @@ const App = () => {
       if (n.type !== 'input') return n;
       const serviceName = serviceNameForInput(n);
       if (!serviceName || !sts[serviceName]) return n;
-      return { ...n, data: { ...n.data, status: sts[serviceName].healthy ? 'online' : 'offline' } };
+      return { ...n, data: { ...n.data, status: healthyForNode(sts[serviceName], n) ? 'online' : 'offline' } };
     }));
     return sts;
   }, [setNodes]);
@@ -938,7 +1022,15 @@ const App = () => {
   }, [addLog, refreshRuntimeStatus]);
 
   const updateNodeData = (nodeId: string, newData: any) => {
-    setNodes(nds => nds.map(n => n.id === nodeId ? { ...n, data: newData } : n));
+    const serviceName = serviceNameForData(newData);
+    const nextPort = Number(newData?.port);
+    setNodes(nds => nds.map(n => {
+      if (n.id === nodeId) return { ...n, data: newData };
+      if (serviceName && serviceNameForInput(n) === serviceName && Number.isInteger(nextPort) && nextPort > 0) {
+        return { ...n, data: { ...n.data, port: nextPort } };
+      }
+      return n;
+    }));
   };
 
   const onNodeContextMenu = useCallback((event: React.MouseEvent, node: Node) => {

@@ -20,11 +20,6 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("env")
     sub.add_parser("install-autostart")
     sub.add_parser("uninstall-autostart")
-    ui = sub.add_parser("ui")
-    ui.add_argument("--start-services", action="store_true")
-    tray = sub.add_parser("tray")
-    tray.add_argument("--start-services", action="store_true")
-    tray.add_argument("--open-settings", action="store_true")
 
     args = parser.parse_args(argv)
     if args.command == "start":
@@ -47,21 +42,6 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "uninstall-autostart":
         autostart.uninstall()
         print("Autostart removed.")
-    elif args.command == "tray":
-        from .tray_app import main as tray_main
-
-        tray_args = []
-        if args.start_services:
-            tray_args.append("--start-services")
-        if args.open_settings:
-            tray_args.append("--open-settings")
-        tray_main(tray_args)
-    elif args.command == "ui":
-        if args.start_services:
-            import threading
-            threading.Thread(target=manager.start_all, daemon=True).start()
-        from .native_ui import run_native_ui
-        run_native_ui()
     else:
         raise SystemExit(f"Unknown command: {args.command}")
 

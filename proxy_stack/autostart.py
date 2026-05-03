@@ -24,9 +24,11 @@ LEGACY_MAC_LABELS = (
 
 
 def launch_command(start_services: bool = True) -> list[str]:
-    command = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, "-m", "proxy_stack.tray_app"]
+    command = [sys.executable, "-m", "proxy_stack"]
     if start_services:
-        command.append("--start-services")
+        command.append("start")
+    else:
+        command.append("status")
     return command
 
 
@@ -127,24 +129,13 @@ def _mac_service_payloads(cfg) -> dict[str, tuple[Path, dict]]:
 def install_macos() -> Path:
     remove_legacy_macos_agents()
     cfg = load_config()
+    last_path = _mac_plist_path()
     for _name, (service_path, service_payload) in _mac_service_payloads(cfg).items():
         _write_macos_plist(service_path, service_payload)
         _bootstrap_macos_plist(service_path, service_payload["Label"])
-
-    plist_path = _mac_plist_path()
-    payload = {
-        "Label": APP_ID,
-        "ProgramArguments": launch_command(start_services=False),
-        "WorkingDirectory": cfg.project_root,
-        "EnvironmentVariables": _mac_common_env(cfg),
-        "RunAtLoad": True,
-        "KeepAlive": False,
-        "StandardOutPath": str(Path.home() / "Library" / "Logs" / "proxyeverywhere.log"),
-        "StandardErrorPath": str(Path.home() / "Library" / "Logs" / "proxyeverywhere.log"),
-    }
-    _write_macos_plist(plist_path, payload)
-    _bootstrap_macos_plist(plist_path, APP_ID)
-    return plist_path
+        last_path = service_path
+    _mac_plist_path().unlink(missing_ok=True)
+    return last_path
 
 
 def uninstall_macos() -> None:
@@ -225,7 +216,8 @@ def uninstall() -> None:
 def is_installed() -> bool:
     system = platform.system()
     if system == "Darwin":
-        return _mac_plist_path().exists()
+        agent_dir = Path.home() / "Library" / "LaunchAgents"
+        return any(agent_dir.glob(f"{APP_ID}.*.plist"))
     if system == "Windows":
         try:
             import winreg

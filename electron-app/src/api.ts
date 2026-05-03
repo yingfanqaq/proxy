@@ -61,11 +61,12 @@ export async function fetchConfig(): Promise<Record<string, any>> {
 }
 
 export async function updateConfig(data: Record<string, any>): Promise<void> {
-  await fetch(`${API_BASE}/api/config`, {
+  const res = await fetch(`${API_BASE}/api/config`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   });
+  if (!res.ok) throw new Error(`status ${res.status}`);
 }
 
 export async function fetchProxyModels(provider: string): Promise<string[]> {

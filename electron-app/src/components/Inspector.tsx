@@ -65,17 +65,22 @@ export const Inspector = ({
     onUpdateNode(id, { ...data, className: newClass, subtype, protocol });
   };
 
-  const usedProxyPorts = useMemo(() => {
+  const conflictingProxyPorts = useMemo(() => {
     if (!allNodes) return new Set<number>();
+    const provider = String(data.provider || data.className || data.label || '').toLowerCase();
     return new Set(
       allNodes
-        .filter(n => n.id !== id && n.type === 'input' && n.data.subtype === 'proxy' && n.data.port)
+        .filter(n => {
+          if (n.id === id || n.type !== 'input' || n.data.subtype !== 'proxy' || !n.data.port) return false;
+          const otherProvider = String(n.data.provider || n.data.className || n.data.label || '').toLowerCase();
+          return otherProvider !== provider;
+        })
         .map(n => Number(n.data.port))
     );
   }, [allNodes, id]);
 
   const currentPort = Number(data.port) || 0;
-  const portConflict = type === 'input' && data.subtype === 'proxy' && currentPort > 0 && usedProxyPorts.has(currentPort);
+  const portConflict = type === 'input' && data.subtype === 'proxy' && currentPort > 0 && conflictingProxyPorts.has(currentPort);
 
   const portInput = (label: string, accent?: boolean) => (
     <div>

@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from proxy_stack import manager
 from proxy_stack.config import ProxyConfig
+from proxy_stack.flows import generate_litellm_config_for_port
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -66,3 +67,24 @@ def test_start_service_falls_back_when_launchd_did_not_open_port(tmp_path, monke
     assert result["via"] == "subprocess"
     assert result["launchd_unhealthy"] is True
     assert calls
+
+
+def test_litellm_config_uses_custom_local_proxy_port(tmp_path, monkeypatch):
+    monkeypatch.setattr("proxy_stack.flows.runtime_dir", lambda: tmp_path)
+    cfg = ProxyConfig(
+        codex_port=39125,
+        flows=[
+            {
+                "id": "custom_codex_port",
+                "enabled": True,
+                "source": {"kind": "local", "provider": "codex"},
+                "middle": {"kind": "litellm"},
+                "outputs": [{"format": "anthropic", "port": 4000, "api_key": "litellm-local-test-key"}],
+                "models": [{"name": "gpt-5.5", "upstream": "gpt-5.5"}],
+            }
+        ],
+    ).normalized()
+
+    text = generate_litellm_config_for_port(cfg, 4000).read_text(encoding="utf-8")
+    assert "api_base: http://127.0.0.1:39125/v1" in text
+    assert "api_base: http://127.0.0.1:39121/v1" not in text

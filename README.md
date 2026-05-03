@@ -20,8 +20,7 @@ Start nodes can be local proxy services or an external relay endpoint. Output no
 ## Built-in Middle Node
 
 - LiteLLM is currently the only middle node.
-- Release builds bundle LiteLLM as a Python dependency inside the app, so users should not need to install a separate `litellm` command.
-- Source/development mode can still use a local `litellm` executable if you run from this repository.
+- The Electron app launches the Python backend from this repository and uses the configured `litellm` executable.
 
 ## Built-in Output Formats
 
@@ -50,7 +49,7 @@ Default local source ports:
 Codex proxy       http://127.0.0.1:39121/v1
 Gemini proxy      http://127.0.0.1:39122
 Claude Code proxy http://127.0.0.1:39123
-Settings page     http://127.0.0.1:39200
+Electron API      http://127.0.0.1:39201
 ```
 
 Default output port:
@@ -59,21 +58,9 @@ Default output port:
 LiteLLM output    http://127.0.0.1:4000
 ```
 
-## Settings and Flow Designer
+## Flow Designer
 
-Open the settings page:
-
-```sh
-http://127.0.0.1:39200
-```
-
-The page includes:
-
-- Service status and logs.
-- Ports, API keys, executable paths, and autostart settings.
-- A Dify-style flow canvas where start, LiteLLM, and output nodes can be moved by dragging.
-- Editable Flow JSON for exact flow definitions.
-- Environment snippets for Claude Code, OpenAI-compatible clients, and Gemini-compatible clients.
+The supported UI is the Electron app in `electron-app/`. It provides the flow canvas, node inspector, service status, runtime logs, quick test snippets, and save/validate controls.
 
 ## Running From Source
 
@@ -81,19 +68,21 @@ Install Python dependencies:
 
 ```sh
 cd /Users/yingfanqaq/mycodelibrary/proxy
-python3 -m pip install -r requirements-app.txt
+python3 -m pip install -e .
 ```
 
-Start everything:
+Start the Python services directly:
 
 ```sh
 python3 -m proxy_stack start
 ```
 
-Open the tray app and settings page:
+Run the Electron app in development:
 
 ```sh
-python3 -m proxy_stack tray --start-services --open-settings
+cd electron-app
+npm install
+npm run dev:electron
 ```
 
 Useful commands:
@@ -166,14 +155,13 @@ export OPENAI_API_KEY=litellm-local-test-key
 
 ## Release Builds
 
-Pushing a tag like `v0.2.0` triggers `.github/workflows/release.yml`, which builds macOS, Linux, and Windows zip artifacts with PyInstaller and attaches them to the GitHub release.
+Pushing a tag like `v0.2.0` triggers `.github/workflows/release.yml`, which builds the macOS Electron app and attaches a zip artifact to the GitHub release.
 
 The release app bundles:
 
-- proxyEverywhere tray/settings code.
+- proxyEverywhere Electron UI.
 - Codex, Gemini, and Claude Code local proxy services.
-- LiteLLM and Python runtime dependencies collected by PyInstaller.
 
-It does not bundle the upstream Codex, Gemini, or Claude CLIs themselves; enable a local source node only after that CLI is installed and logged in on the machine.
+It does not bundle the upstream Codex, Gemini, Claude, Python, or LiteLLM CLIs themselves; enable a local source node only after that CLI is installed and logged in on the machine.
 
-That means normal users should download the platform-specific zip and run the app, without separately installing LiteLLM.
+Users should download the macOS zip, run the app, and keep the local Python environment configured for the backend services.
