@@ -32,6 +32,8 @@ def pyinstaller_args() -> list[str]:
         "--name",
         "proxyEverywhere",
         "--windowed",
+        "--osx-bundle-identifier",
+        "com.yingfanqaq.proxyeverywhere",
         "--clean",
         "--noconfirm",
         "--collect-all",
@@ -85,8 +87,31 @@ def package_output() -> Path:
     return archive
 
 
+def finalize_macos_app() -> None:
+    if platform.system() != "Darwin":
+        return
+    plist = ROOT / "dist" / "proxyEverywhere.app" / "Contents" / "Info.plist"
+    if not plist.exists():
+        return
+    subprocess.run(
+        ["/usr/libexec/PlistBuddy", "-c", "Set :LSUIElement true", str(plist)],
+        cwd=ROOT,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["/usr/libexec/PlistBuddy", "-c", "Add :LSUIElement bool true", str(plist)],
+        cwd=ROOT,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def main() -> None:
     subprocess.run([build_python(), "-m", "PyInstaller", *pyinstaller_args()], cwd=ROOT, check=True)
+    finalize_macos_app()
     archive = package_output()
     print(archive)
 
