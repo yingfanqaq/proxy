@@ -9,6 +9,21 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+HEAVY_OPTIONAL_MODULES = [
+    "IPython",
+    "matplotlib",
+    "pandas",
+    "pytest",
+    "scipy",
+    "torch",
+]
+
+
+def build_python() -> str:
+    venv_python = ROOT / ".venv" / ("Scripts/python.exe" if platform.system() == "Windows" else "bin/python")
+    if venv_python.exists() and Path(sys.executable) != venv_python:
+        return str(venv_python)
+    return sys.executable
 
 
 def pyinstaller_args() -> list[str]:
@@ -35,6 +50,12 @@ def pyinstaller_args() -> list[str]:
         "pystray",
         "--collect-all",
         "PIL",
+        "--hidden-import",
+        "PySide6.QtCore",
+        "--hidden-import",
+        "PySide6.QtGui",
+        "--hidden-import",
+        "PySide6.QtWidgets",
         "--add-data",
         f"codex-chat-proxy{sep}codex-chat-proxy",
         "--add-data",
@@ -43,6 +64,8 @@ def pyinstaller_args() -> list[str]:
         f"claude-code-proxy{sep}claude-code-proxy",
         "proxy_stack_app.py",
     ]
+    for module in HEAVY_OPTIONAL_MODULES:
+        args.extend(["--exclude-module", module])
     return args
 
 
@@ -63,7 +86,7 @@ def package_output() -> Path:
 
 
 def main() -> None:
-    subprocess.run([sys.executable, "-m", "PyInstaller", *pyinstaller_args()], cwd=ROOT, check=True)
+    subprocess.run([build_python(), "-m", "PyInstaller", *pyinstaller_args()], cwd=ROOT, check=True)
     archive = package_output()
     print(archive)
 
