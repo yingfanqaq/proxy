@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -21,10 +22,70 @@ PORT = int(os.environ.get("PORT", "39123"))
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN") or shutil.which("claude") or "claude"
 CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "900"))
 DEFAULT_MODEL = os.environ.get("CLAUDE_DEFAULT_MODEL", "sonnet")
+PERMISSION_MODE = os.environ.get("CLAUDE_PERMISSION_MODE", "bypassPermissions").strip() or "bypassPermissions"
+ALLOWED_TOOLS = os.environ.get(
+    "CLAUDE_ALLOWED_TOOLS",
+    "Task,Bash,BashOutput,KillBash,Read,Edit,Write,MultiEdit,Glob,Grep,LS,TodoWrite,WebSearch,WebFetch,NotebookRead,NotebookEdit,ExitPlanMode",
+).strip()
+AVAILABLE_TOOLS = os.environ.get("CLAUDE_TOOLS", "default").strip()
+DISALLOWED_TOOLS = os.environ.get("CLAUDE_DISALLOWED_TOOLS", "").strip()
+MCP_CONFIG = os.environ.get("CLAUDE_MCP_CONFIG", "").strip()
+SETTINGS = os.environ.get("CLAUDE_SETTINGS", "").strip()
+SETTING_SOURCES = os.environ.get("CLAUDE_SETTING_SOURCES", "").strip()
+ADD_DIRS = os.environ.get("CLAUDE_ADD_DIRS", "").strip()
+PLUGIN_DIRS = os.environ.get("CLAUDE_PLUGIN_DIRS", "").strip()
+SYSTEM_PROMPT = os.environ.get("CLAUDE_SYSTEM_PROMPT", "").strip()
+APPEND_SYSTEM_PROMPT = os.environ.get("CLAUDE_APPEND_SYSTEM_PROMPT", "").strip()
+BETAS = os.environ.get("CLAUDE_BETAS", "").strip()
+FALLBACK_MODEL = os.environ.get("CLAUDE_FALLBACK_MODEL", "").strip()
+MAX_BUDGET_USD = os.environ.get("CLAUDE_MAX_BUDGET_USD", "").strip()
+EXTRA_ARGS = os.environ.get("CLAUDE_EXTRA_ARGS", "").strip()
+MAX_TURNS = os.environ.get("CLAUDE_MAX_TURNS", "8").strip()
+AGENT = os.environ.get("CLAUDE_AGENT", "").strip()
+AGENTS = os.environ.get("CLAUDE_AGENTS", "").strip()
+STRICT_MCP_CONFIG = os.environ.get("CLAUDE_STRICT_MCP_CONFIG", "").strip().lower() in {"1", "true", "yes", "on"}
+DANGEROUSLY_SKIP_PERMISSIONS = os.environ.get("CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS", "").strip().lower() in {"1", "true", "yes", "on"}
+NO_SESSION_PERSISTENCE = os.environ.get("CLAUDE_NO_SESSION_PERSISTENCE", "1").strip().lower() in {"1", "true", "yes", "on"}
+BARE_MODE = os.environ.get("CLAUDE_BARE", "").strip().lower() in {"1", "true", "yes", "on"}
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+EFFORT_ALIASES = {"minimal": "low"}
+
+
+def default_model_catalog() -> list[str]:
+    base_models = [
+        "claude-code",
+        "claude-code-sonnet",
+        "claude-code-opus",
+        "claude-code-haiku",
+        "claude-code-opus-4-7",
+        "claude-code-opus-4-6",
+        "claude-code-sonnet-4-6",
+        "claude-code-haiku-4-5",
+        "sonnet",
+        "opus",
+        "haiku",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+    ]
+    effort_models: list[str] = []
+    effort_matrix = {
+        "claude-code-opus": EFFORT_LEVELS,
+        "claude-code-opus-4-7": EFFORT_LEVELS,
+        "claude-code-opus-4-6": ("low", "medium", "high", "max"),
+        "claude-code-sonnet": ("low", "medium", "high", "max"),
+        "claude-code-sonnet-4-6": ("low", "medium", "high", "max"),
+    }
+    for model, efforts in effort_matrix.items():
+        effort_models.extend(f"{model}-{effort}" for effort in efforts)
+    return list(dict.fromkeys([*base_models, *effort_models]))
+
+
 MODELS = [
     item.strip()
     for item in os.environ.get(
-        "CLAUDE_MODELS", "claude-code,sonnet,opus,haiku"
+        "CLAUDE_MODELS", ",".join(default_model_catalog())
     ).split(",")
     if item.strip()
 ]
@@ -64,6 +125,46 @@ def content_to_text(content: Any) -> str:
     return str(content or "")
 
 
+def json_for_prompt(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=2)
+
+
+def split_env_items(value: str, separator: str = ",") -> list[str]:
+    return [item.strip() for item in value.split(separator) if item.strip()]
+
+
+def api_config_to_prompt(payload: dict[str, Any]) -> str:
+    config_keys = (
+        "max_tokens",
+        "tools",
+        "tool_choice",
+        "thinking",
+        "temperature",
+        "top_p",
+        "top_k",
+        "stop_sequences",
+        "metadata",
+        "service_tier",
+        "container",
+        "mcp_servers",
+        "context_management",
+        "output_config",
+        "cache_control",
+        "inference_geo",
+    )
+    config = {key: payload[key] for key in config_keys if key in payload}
+    if not config:
+        return ""
+    guidance = [
+        "Anthropic Messages API request configuration:",
+        json_for_prompt(config),
+        "Honor these settings as closely as Claude Code print mode allows.",
+        "For Anthropic server tools such as web_search, use Claude Code's built-in WebSearch/WebFetch tools directly when useful.",
+        "If custom client tools are provided, return a clear tool request in the response instead of silently ignoring them.",
+    ]
+    return "\n".join(guidance)
+
+
 def messages_to_prompt(payload: dict[str, Any]) -> str:
     chunks: list[str] = []
     system = payload.get("system")
@@ -73,6 +174,9 @@ def messages_to_prompt(payload: dict[str, Any]) -> str:
         for block in system:
             if isinstance(block, dict) and block.get("type") == "text":
                 chunks.append(f"System:\n{block.get('text', '')}")
+    api_config = api_config_to_prompt(payload)
+    if api_config:
+        chunks.append(api_config)
     for message in payload.get("messages", []):
         if not isinstance(message, dict):
             continue
@@ -96,15 +200,68 @@ def messages_to_prompt(payload: dict[str, Any]) -> str:
                             f"{role.title()} [tool_result {block.get('tool_use_id', '')}]:\n"
                             f"{content_to_text(result_content)}"
                         )
+                    else:
+                        chunks.append(
+                            f"{role.title()} [{block.get('type', 'content')}]:\n"
+                            f"{json_for_prompt(block)}"
+                        )
     return "\n\n".join(chunks).strip() or "Reply OK."
 
 
+def normalize_effort(value: Any) -> str | None:
+    effort = str(value or "").strip().lower()
+    effort = EFFORT_ALIASES.get(effort, effort)
+    if effort in EFFORT_LEVELS:
+        return effort
+    return None
+
+
+def split_model_effort(model: str) -> tuple[str, str | None]:
+    for effort in EFFORT_LEVELS:
+        suffix = f"-{effort}"
+        if model.endswith(suffix):
+            return model[: -len(suffix)], effort
+    return model, None
+
+
 def normalize_model(model: str | None) -> str:
+    model = str(model or "claude-code").strip()
     if not model or model == "claude-code":
         return DEFAULT_MODEL
     if model.startswith("claude-code-"):
-        return model.removeprefix("claude-code-")
+        short = model.removeprefix("claude-code-")
+        if short.startswith("claude-"):
+            return short
+        if short.startswith(("opus-", "sonnet-", "haiku-")):
+            return f"claude-{short}"
+        return short
+    if model.startswith(("opus-", "sonnet-", "haiku-")):
+        return f"claude-{model}"
     return model
+
+
+def effort_from_payload(payload: dict[str, Any]) -> str | None:
+    candidates: list[Any] = [
+        payload.get("effort"),
+        payload.get("reasoning_effort"),
+    ]
+    output_config = payload.get("output_config")
+    if isinstance(output_config, dict):
+        candidates.append(output_config.get("effort"))
+    thinking = payload.get("thinking")
+    if isinstance(thinking, dict):
+        candidates.append(thinking.get("effort"))
+    for candidate in candidates:
+        effort = normalize_effort(candidate)
+        if effort:
+            return effort
+    return None
+
+
+def resolve_model_request(model: str | None, payload: dict[str, Any]) -> tuple[str, str | None]:
+    raw_model = str(model or "claude-code").strip()
+    model_without_effort, model_effort = split_model_effort(raw_model)
+    return normalize_model(model_without_effort), effort_from_payload(payload) or model_effort
 
 
 def claude_env() -> dict[str, str]:
@@ -122,17 +279,74 @@ def claude_env() -> dict[str, str]:
     return env
 
 
-def run_claude_json(prompt: str, model: str, max_tokens: int | None = None) -> dict[str, Any]:
+def claude_command(
+    prompt: str,
+    model: str,
+    output_format: str,
+    effort: str | None = None,
+    max_tokens: int | None = None,
+    verbose: bool = False,
+) -> list[str]:
     command = [
         CLAUDE_BIN,
         "-p",
         "--model", model,
-        "--output-format", "json",
-        "--permission-mode", "dontAsk",
     ]
-    if max_tokens:
-        command.extend(["--max-turns", "1"])
+    if effort:
+        command.extend(["--effort", effort])
+    command.extend(["--output-format", output_format])
+    if verbose:
+        command.append("--verbose")
+    if BARE_MODE:
+        command.append("--bare")
+    if NO_SESSION_PERSISTENCE:
+        command.append("--no-session-persistence")
+    if SETTINGS:
+        command.extend(["--settings", SETTINGS])
+    if SETTING_SOURCES:
+        command.extend(["--setting-sources", SETTING_SOURCES])
+    if ADD_DIRS:
+        command.extend(["--add-dir", *split_env_items(ADD_DIRS, os.pathsep)])
+    for plugin_dir in split_env_items(PLUGIN_DIRS, os.pathsep):
+        command.extend(["--plugin-dir", plugin_dir])
+    if SYSTEM_PROMPT:
+        command.extend(["--system-prompt", SYSTEM_PROMPT])
+    if APPEND_SYSTEM_PROMPT:
+        command.extend(["--append-system-prompt", APPEND_SYSTEM_PROMPT])
+    if BETAS:
+        command.extend(["--betas", *split_env_items(BETAS)])
+    if MCP_CONFIG:
+        command.extend(["--mcp-config", *split_env_items(MCP_CONFIG, os.pathsep)])
+    if STRICT_MCP_CONFIG:
+        command.append("--strict-mcp-config")
+    if FALLBACK_MODEL:
+        command.extend(["--fallback-model", FALLBACK_MODEL])
+    if MAX_BUDGET_USD:
+        command.extend(["--max-budget-usd", MAX_BUDGET_USD])
+    if AGENT:
+        command.extend(["--agent", AGENT])
+    if AGENTS:
+        command.extend(["--agents", AGENTS])
+    if DANGEROUSLY_SKIP_PERMISSIONS:
+        command.append("--dangerously-skip-permissions")
+    if PERMISSION_MODE:
+        command.extend(["--permission-mode", PERMISSION_MODE])
+    if AVAILABLE_TOOLS:
+        command.append(f"--tools={AVAILABLE_TOOLS}")
+    if ALLOWED_TOOLS:
+        command.append(f"--allowed-tools={ALLOWED_TOOLS}")
+    if DISALLOWED_TOOLS:
+        command.append(f"--disallowed-tools={DISALLOWED_TOOLS}")
+    if EXTRA_ARGS:
+        command.extend(shlex.split(EXTRA_ARGS))
+    if MAX_TURNS:
+        command.extend(["--max-turns", MAX_TURNS])
     command.append(prompt)
+    return command
+
+
+def run_claude_json(prompt: str, model: str, effort: str | None = None, max_tokens: int | None = None) -> dict[str, Any]:
+    command = claude_command(prompt, model, "json", effort=effort, max_tokens=max_tokens)
     completed = subprocess.run(
         command,
         env=claude_env(),
@@ -154,16 +368,8 @@ def run_claude_json(prompt: str, model: str, max_tokens: int | None = None) -> d
         return {"result": completed.stdout.strip(), "is_text": True}
 
 
-def run_claude_streaming(prompt: str, model: str) -> subprocess.Popen:
-    command = [
-        CLAUDE_BIN,
-        "-p",
-        "--model", model,
-        "--output-format", "stream-json",
-        "--verbose",
-        "--permission-mode", "dontAsk",
-        prompt,
-    ]
+def run_claude_streaming(prompt: str, model: str, effort: str | None = None) -> subprocess.Popen:
+    command = claude_command(prompt, model, "stream-json", effort=effort, verbose=True)
     return subprocess.Popen(
         command,
         env=claude_env(),
@@ -196,7 +402,27 @@ def estimate_tokens(text: str) -> int:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    return {"status": "ok", "service": APP_NAME, "models": MODELS, "claude_bin": CLAUDE_BIN}
+    return {
+        "status": "ok",
+        "service": APP_NAME,
+        "models": MODELS,
+        "effort_levels": EFFORT_LEVELS,
+        "default_model": DEFAULT_MODEL,
+        "permission_mode": PERMISSION_MODE,
+        "allowed_tools": ALLOWED_TOOLS,
+        "available_tools": AVAILABLE_TOOLS,
+        "disallowed_tools": DISALLOWED_TOOLS,
+        "mcp_config": MCP_CONFIG,
+        "setting_sources": SETTING_SOURCES,
+        "additional_directories": split_env_items(ADD_DIRS, os.pathsep),
+        "plugin_directories": split_env_items(PLUGIN_DIRS, os.pathsep),
+        "strict_mcp_config": STRICT_MCP_CONFIG,
+        "dangerously_skip_permissions": DANGEROUSLY_SKIP_PERMISSIONS,
+        "no_session_persistence": NO_SESSION_PERSISTENCE,
+        "bare_mode": BARE_MODE,
+        "max_turns": MAX_TURNS,
+        "claude_bin": CLAUDE_BIN,
+    }
 
 
 @app.get("/v1/models")
@@ -224,15 +450,15 @@ async def messages(
     require_auth(authorization, x_api_key)
     payload = await request.json()
     model_raw = payload.get("model") or "claude-code"
-    model = normalize_model(model_raw)
+    model, effort = resolve_model_request(model_raw, payload)
     prompt = messages_to_prompt(payload)
     max_tokens = payload.get("max_tokens")
     wants_stream = payload.get("stream", False)
 
     if wants_stream:
-        return await _stream_messages(prompt, model, model_raw, max_tokens)
+        return await _stream_messages(prompt, model, model_raw, effort, max_tokens)
 
-    result = await asyncio.to_thread(run_claude_json, prompt, model, max_tokens)
+    result = await asyncio.to_thread(run_claude_json, prompt, model, effort, max_tokens)
     content_blocks = parse_claude_json_to_content(result)
     all_text = " ".join(
         b.get("text", "") for b in content_blocks if b.get("type") == "text"
@@ -261,7 +487,7 @@ async def messages(
 
 
 async def _stream_messages(
-    prompt: str, model: str, model_raw: str, max_tokens: int | None
+    prompt: str, model: str, model_raw: str, effort: str | None, max_tokens: int | None
 ) -> StreamingResponse:
     msg_id = f"msg_{uuid.uuid4().hex}"
     _ = max_tokens
@@ -282,7 +508,7 @@ async def _stream_messages(
         }
         yield f"event: message_start\ndata: {json.dumps(event_data, ensure_ascii=False)}\n\n"
 
-        process = await asyncio.to_thread(run_claude_streaming, prompt, model)
+        process = await asyncio.to_thread(run_claude_streaming, prompt, model, effort)
         block_index = 0
         total_output = 0
         block_open = False

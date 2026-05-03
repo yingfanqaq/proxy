@@ -298,7 +298,6 @@ def normalize_model_name(model_name: str) -> str:
 
 def make_code_assist_request(model_name: str, body: dict[str, Any], project: str | None) -> dict[str, Any]:
     request_body = dict(body)
-    request_body.pop("cachedContent", None)
     payload: dict[str, Any] = {
         "model": normalize_model_name(model_name),
         "user_prompt_id": f"gemini-proxy-{uuid.uuid4().hex}",
@@ -307,6 +306,17 @@ def make_code_assist_request(model_name: str, body: dict[str, Any], project: str
     if project:
         payload["project"] = project
     return payload
+
+
+def count_tokens_request(model_name: str, body: dict[str, Any]) -> dict[str, Any]:
+    request_body = {
+        "model": f"models/{normalize_model_name(model_name)}",
+        "contents": body.get("contents", []),
+    }
+    for key in ("systemInstruction", "tools", "toolConfig", "generationConfig", "safetySettings", "cachedContent"):
+        if key in body:
+            request_body[key] = body[key]
+    return {"request": request_body}
 
 
 def unwrap_code_assist(payload: Any) -> Any:
@@ -386,7 +396,20 @@ async def stream_code_assist(payload: dict[str, Any]) -> Response:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    return {"status": "ok", "service": APP_NAME, "models": MODEL_IDS}
+    return {
+        "status": "ok",
+        "service": APP_NAME,
+        "models": MODEL_IDS,
+        "native_request_passthrough": [
+            "contents",
+            "systemInstruction",
+            "tools",
+            "toolConfig",
+            "generationConfig",
+            "safetySettings",
+            "cachedContent",
+        ],
+    }
 
 
 @app.get("/v1beta/models")
@@ -429,15 +452,7 @@ async def stream_generate_content(model_name: str, request: Request) -> Response
 async def count_tokens(model_name: str, request: Request) -> Response:
     require_proxy_key(request)
     body = await request.json()
-    count_payload = {
-        "request": {
-            "model": f"models/{normalize_model_name(model_name)}",
-            "contents": body.get("contents", []),
-        }
-    }
-    if isinstance(body.get("systemInstruction"), dict):
-        count_payload["request"]["systemInstruction"] = body["systemInstruction"]
-    return await post_code_assist("countTokens", count_payload)
+    return await post_code_assist("countTokens", count_tokens_request(model_name, body))
 
 
 if __name__ == "__main__":

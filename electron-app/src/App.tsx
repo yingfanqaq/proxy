@@ -70,7 +70,7 @@ const LOCAL_PROVIDER_PORTS: Record<string, number> = {
 const FALLBACK_PROXY_MODELS: Record<string, string[]> = {
   codex: ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5.2'],
   gemini: ['gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
-  claude: ['claude-code', 'sonnet', 'opus', 'haiku'],
+  claude: ['claude-code', 'claude-code-sonnet', 'claude-code-opus', 'claude-code-haiku', 'claude-code-opus-4-7', 'claude-code-opus-4-7-high', 'claude-code-opus-4-7-xhigh', 'claude-code-opus-4-6', 'claude-code-opus-4-6-high', 'claude-code-sonnet-4-6', 'claude-code-sonnet-4-6-high', 'sonnet', 'opus', 'haiku'],
 };
 
 const PROVIDER_PROTOCOLS: Record<string, string> = {
@@ -348,6 +348,13 @@ function defaultAliases(desc: SourceDescriptor, models: string[]): [string, stri
       ['claude-code-sonnet', 'sonnet'],
       ['claude-code-opus', 'opus'],
       ['claude-code-haiku', 'haiku'],
+      ['claude-code-opus-4-7', 'claude-code-opus-4-7'],
+      ['claude-code-opus-4-7-high', 'claude-code-opus-4-7-high'],
+      ['claude-code-opus-4-7-xhigh', 'claude-code-opus-4-7-xhigh'],
+      ['claude-code-opus-4-6', 'claude-code-opus-4-6'],
+      ['claude-code-opus-4-6-high', 'claude-code-opus-4-6-high'],
+      ['claude-code-sonnet-4-6', 'claude-code-sonnet-4-6'],
+      ['claude-code-sonnet-4-6-high', 'claude-code-sonnet-4-6-high'],
     ];
     if (models.includes('sonnet')) aliases.push(['sonnet', 'sonnet']);
     if (models.includes('opus')) aliases.push(['opus', 'opus']);

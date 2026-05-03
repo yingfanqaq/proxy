@@ -71,6 +71,13 @@ def default_flows() -> list[dict[str, Any]]:
                 {"name": "claude-code-sonnet", "upstream": "sonnet"},
                 {"name": "claude-code-opus", "upstream": "opus"},
                 {"name": "claude-code-haiku", "upstream": "haiku"},
+                {"name": "claude-code-opus-4-7", "upstream": "claude-code-opus-4-7"},
+                {"name": "claude-code-opus-4-7-high", "upstream": "claude-code-opus-4-7-high"},
+                {"name": "claude-code-opus-4-7-xhigh", "upstream": "claude-code-opus-4-7-xhigh"},
+                {"name": "claude-code-opus-4-6", "upstream": "claude-code-opus-4-6"},
+                {"name": "claude-code-opus-4-6-high", "upstream": "claude-code-opus-4-6-high"},
+                {"name": "claude-code-sonnet-4-6", "upstream": "claude-code-sonnet-4-6"},
+                {"name": "claude-code-sonnet-4-6-high", "upstream": "claude-code-sonnet-4-6-high"},
             ],
             "layout": {
                 "source": {"x": 60, "y": 370},
@@ -88,6 +95,10 @@ def default_flows() -> list[dict[str, Any]]:
             "models": [
                 {"name": "claude-code", "upstream": "claude-code"},
                 {"name": "claude-code-sonnet", "upstream": "sonnet"},
+                {"name": "claude-code-opus-4-7", "upstream": "claude-code-opus-4-7"},
+                {"name": "claude-code-opus-4-7-high", "upstream": "claude-code-opus-4-7-high"},
+                {"name": "claude-code-sonnet-4-6", "upstream": "claude-code-sonnet-4-6"},
+                {"name": "claude-code-sonnet-4-6-high", "upstream": "claude-code-sonnet-4-6-high"},
             ],
             "layout": {
                 "source": {"x": 60, "y": 510},
@@ -111,6 +122,12 @@ def normalized_flows(flows: Any) -> list[dict[str, Any]]:
         base.setdefault("middle", {"kind": "litellm"})
         base.setdefault("outputs", [])
         base.setdefault("models", [])
+        default_models = defaults.get(str(flow.get("id")), {}).get("models", [])
+        existing_model_names = {str(model.get("name")) for model in base["models"] if isinstance(model, dict)}
+        for model in default_models:
+            if isinstance(model, dict) and str(model.get("name")) not in existing_model_names:
+                base["models"].append(deepcopy(model))
+                existing_model_names.add(str(model.get("name")))
         base.setdefault("layout", {})
         merged.append(base)
     return merged or default_flows()
@@ -226,9 +243,9 @@ def generate_litellm_config_for_port(config: ProxyConfig, port: int) -> Path:
                     f"      model: {prefix}/{upstream}",
                     f"      api_base: {details['api_base']}",
                     f"      api_key: {details['api_key_ref']}",
-                    "",
                 ]
             )
+            lines.append("")
     if len(lines) == 1:
         lines.extend(
             [

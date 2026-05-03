@@ -23,6 +23,7 @@ DEFAULT_BIND = "127.0.0.1"
 DEFAULT_PORT = 39121
 DEFAULT_PROXY_KEY = "codex-proxy-local-key"
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
+DEFAULT_OPENAI_RESPONSES_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_TOKEN_URL = "https://auth.openai.com/oauth/token"
 DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 DEFAULT_CODEX_CLIENT_VERSION = "0.125.0"
@@ -41,6 +42,7 @@ def env(name: str, default: str) -> str:
 
 PROXY_KEY = env("CODEX_PROXY_API_KEY", DEFAULT_PROXY_KEY)
 CODEX_BASE_URL = env("CODEX_BASE_URL", DEFAULT_CODEX_BASE_URL).rstrip("/")
+OPENAI_RESPONSES_BASE_URL = env("CODEX_OPENAI_RESPONSES_BASE_URL", DEFAULT_OPENAI_RESPONSES_BASE_URL).rstrip("/")
 TOKEN_URL = env("CODEX_OAUTH_TOKEN_URL", DEFAULT_TOKEN_URL)
 CLIENT_ID = env("CODEX_OAUTH_CLIENT_ID", DEFAULT_CLIENT_ID)
 VERSION_RE = re.compile("([0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][^\\s]+)?)")
@@ -154,6 +156,34 @@ async def load_auth() -> dict[str, Any]:
     return auth
 
 
+def auth_info_from_payload(auth: dict[str, Any]) -> dict[str, Any]:
+    tokens = auth.get("tokens")
+    if isinstance(tokens, dict) and isinstance(tokens.get("access_token"), str) and tokens["access_token"]:
+        return {"mode": "chatgpt", "auth": auth}
+    api_key = auth.get("OPENAI_API_KEY") or auth.get("openai_api_key")
+    if isinstance(api_key, str) and api_key:
+        return {"mode": "openai_api_key", "api_key": api_key}
+    return {}
+
+
+async def load_auth_info() -> dict[str, Any]:
+    configured_api_key = os.environ.get("CODEX_OPENAI_API_KEY", "").strip()
+    if configured_api_key:
+        return {"mode": "openai_api_key", "api_key": configured_api_key}
+    if not AUTH_PATH.exists():
+        raise HTTPException(status_code=401, detail=f"Codex auth file not found: {AUTH_PATH}")
+    auth = await asyncio.to_thread(read_json, AUTH_PATH)
+    info = auth_info_from_payload(auth)
+    if not info:
+        raise HTTPException(status_code=401, detail="Codex auth file has neither ChatGPT tokens nor OPENAI_API_KEY")
+    if info["mode"] == "chatgpt":
+        tokens = auth["tokens"]
+        if token_expiring(tokens.get("access_token")):
+            auth = await refresh_auth(auth)
+            info = {"mode": "chatgpt", "auth": auth}
+    return info
+
+
 async def refresh_auth(auth: dict[str, Any]) -> dict[str, Any]:
     async with credential_lock:
         current = await asyncio.to_thread(read_json, AUTH_PATH)
@@ -201,7 +231,10 @@ async def refresh_auth(auth: dict[str, Any]) -> dict[str, Any]:
 
 
 async def access_token_and_account() -> tuple[str, str | None]:
-    auth = await load_auth()
+    info = await load_auth_info()
+    if info.get("mode") != "chatgpt":
+        raise HTTPException(status_code=401, detail="ChatGPT backend requests require Codex OAuth tokens")
+    auth = info["auth"]
     tokens = auth["tokens"]
     access_token = tokens["access_token"]
     claims = decode_jwt(tokens.get("id_token") or access_token)
@@ -250,7 +283,11 @@ def convert_tools(tools: Any) -> list[dict[str, Any]]:
     if not isinstance(tools, list):
         return converted
     for tool in tools:
-        if not isinstance(tool, dict) or tool.get("type") != "function":
+        if not isinstance(tool, dict):
+            continue
+        if tool.get("type") != "function":
+            if isinstance(tool.get("type"), str):
+                converted.append(dict(tool))
             continue
         fn = tool.get("function")
         if not isinstance(fn, dict):
@@ -258,15 +295,124 @@ def convert_tools(tools: Any) -> list[dict[str, Any]]:
         name = fn.get("name")
         if not isinstance(name, str) or not name:
             continue
-        converted.append(
-            {
-                "type": "function",
-                "name": name,
-                "description": fn.get("description") or "",
-                "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
-            }
-        )
+        response_tool = {
+            "type": "function",
+            "name": name,
+            "description": fn.get("description") or "",
+            "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
+        }
+        if "strict" in fn:
+            response_tool["strict"] = fn["strict"]
+        converted.append(response_tool)
     return converted
+
+
+def normalize_reasoning_effort(effort: Any) -> Any:
+    return "xhigh" if effort == "max" else effort
+
+
+def copy_present(source: dict[str, Any], target: dict[str, Any], keys: tuple[str, ...]) -> None:
+    for key in keys:
+        if key in source:
+            target[key] = source[key]
+
+
+def output_token_limit(payload: dict[str, Any]) -> Any:
+    for key in ("max_output_tokens", "max_tokens", "max_completion_tokens"):
+        if payload.get(key) is not None:
+            return payload[key]
+    return None
+
+
+def convert_tool_choice(tool_choice: Any) -> Any:
+    if not isinstance(tool_choice, dict):
+        return tool_choice
+    if tool_choice.get("type") != "function":
+        return tool_choice
+    function = tool_choice.get("function")
+    if isinstance(function, dict) and function.get("name"):
+        return {"type": "function", "name": function["name"]}
+    return tool_choice
+
+
+def response_format_to_text(response_format: Any) -> dict[str, Any] | None:
+    if not isinstance(response_format, dict):
+        return None
+    format_type = response_format.get("type")
+    if format_type in {"text", "json_object"}:
+        return {"format": {"type": format_type}}
+    if format_type == "json_schema":
+        schema = response_format.get("json_schema")
+        if isinstance(schema, dict):
+            text_format: dict[str, Any] = {
+                "type": "json_schema",
+                "name": schema.get("name") or "response",
+                "schema": schema.get("schema") or {},
+            }
+            if "description" in schema:
+                text_format["description"] = schema["description"]
+            if "strict" in schema:
+                text_format["strict"] = schema["strict"]
+            return {"format": text_format}
+    return {"format": response_format}
+
+
+def apply_responses_options(source: dict[str, Any], target: dict[str, Any]) -> None:
+    copy_present(
+        source,
+        target,
+        (
+            "temperature",
+            "top_p",
+            "background",
+            "metadata",
+            "include",
+            "previous_response_id",
+            "conversation",
+            "prompt",
+            "prompt_cache_key",
+            "prompt_cache_retention",
+            "safety_identifier",
+            "service_tier",
+            "store",
+            "truncation",
+            "max_tool_calls",
+            "top_logprobs",
+        ),
+    )
+    if "user" in source and "safety_identifier" not in source:
+        target["safety_identifier"] = source["user"]
+    limit = output_token_limit(source)
+    if limit is not None:
+        target["max_output_tokens"] = limit
+    if "tool_choice" in source:
+        target["tool_choice"] = convert_tool_choice(source["tool_choice"])
+    stream_options = source.get("stream_options")
+    if isinstance(stream_options, dict):
+        allowed_stream_options = {
+            key: stream_options[key]
+            for key in ("include_obfuscation",)
+            if key in stream_options
+        }
+        if allowed_stream_options:
+            target["stream_options"] = allowed_stream_options
+    if "text" in source:
+        target["text"] = source["text"]
+    elif "response_format" in source:
+        text = response_format_to_text(source["response_format"])
+        if text:
+            target["text"] = text
+    effort = source.get("reasoning_effort")
+    reasoning = source.get("reasoning")
+    if isinstance(reasoning, dict):
+        reasoning = dict(reasoning)
+        if reasoning.get("effort") is not None:
+            reasoning["effort"] = normalize_reasoning_effort(reasoning["effort"])
+        if effort is not None and not reasoning.get("effort"):
+            reasoning["effort"] = normalize_reasoning_effort(effort)
+        target["reasoning"] = reasoning
+    elif effort is not None:
+        target["reasoning"] = {"effort": normalize_reasoning_effort(effort)}
 
 
 def chat_to_responses(payload: dict[str, Any]) -> dict[str, Any]:
@@ -307,11 +453,12 @@ def chat_to_responses(payload: dict[str, Any]) -> dict[str, Any]:
                     if not isinstance(tool_call, dict):
                         continue
                     fn = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+                    call_id = tool_call.get("id") or f"call_{uuid.uuid4().hex}"
                     input_items.append(
                         {
                             "type": "function_call",
-                            "id": tool_call.get("id") or f"call_{uuid.uuid4().hex}",
-                            "call_id": tool_call.get("id") or f"call_{uuid.uuid4().hex}",
+                            "id": call_id,
+                            "call_id": call_id,
                             "name": fn.get("name") or "",
                             "arguments": fn.get("arguments") or "{}",
                         }
@@ -351,11 +498,7 @@ def chat_to_responses(payload: dict[str, Any]) -> dict[str, Any]:
         responses_payload["tools"] = tools
     if isinstance(payload.get("parallel_tool_calls"), bool):
         responses_payload["parallel_tool_calls"] = payload["parallel_tool_calls"]
-    if payload.get("reasoning_effort"):
-        effort = payload["reasoning_effort"]
-        if effort == "max":
-            effort = "xhigh"
-        responses_payload["reasoning"] = {"effort": effort}
+    apply_responses_options(payload, responses_payload)
     return responses_payload
 
 
@@ -401,19 +544,9 @@ def completion_usage(usage: Any) -> dict[str, Any] | None:
 
 def sanitize_responses_payload(payload: dict[str, Any]) -> dict[str, Any]:
     sanitized = dict(payload)
-    for key in ("max_output_tokens", "max_tokens", "max_completion_tokens", "user"):
+    apply_responses_options(payload, sanitized)
+    for key in ("max_tokens", "max_completion_tokens", "response_format", "reasoning_effort", "user"):
         sanitized.pop(key, None)
-    effort = sanitized.pop("reasoning_effort", None)
-    reasoning = sanitized.get("reasoning")
-    if isinstance(reasoning, dict):
-        reasoning = dict(reasoning)
-        if reasoning.get("effort") == "max":
-            reasoning["effort"] = "xhigh"
-        if effort is not None and not reasoning.get("effort"):
-            reasoning["effort"] = "xhigh" if effort == "max" else effort
-        sanitized["reasoning"] = reasoning
-    elif effort is not None:
-        sanitized["reasoning"] = {"effort": "xhigh" if effort == "max" else effort}
     return sanitized
 
 
@@ -567,7 +700,26 @@ def event_to_chat_chunks(event: dict[str, Any], state: dict[str, Any]) -> list[d
 
 
 async def upstream_headers(request: Request) -> dict[str, str]:
-    token, account = await access_token_and_account()
+    info = await load_auth_info()
+    if info.get("mode") == "openai_api_key":
+        return {
+            "Authorization": f"Bearer {info['api_key']}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "User-Agent": "codex-chat-proxy",
+        }
+    auth = info["auth"]
+    tokens = auth["tokens"]
+    token = tokens["access_token"]
+    claims = decode_jwt(tokens.get("id_token") or token)
+    auth_claims = claims.get("https://api.openai.com/auth")
+    account = None
+    if isinstance(auth_claims, dict):
+        value = auth_claims.get("chatgpt_account_id")
+        if isinstance(value, str) and value:
+            account = value
+    if not account and isinstance(tokens.get("account_id"), str):
+        account = tokens["account_id"]
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -585,9 +737,11 @@ async def upstream_headers(request: Request) -> dict[str, str]:
 
 
 async def send_upstream(payload: dict[str, Any], request: Request) -> httpx.Response:
+    info = await load_auth_info()
+    base_url = OPENAI_RESPONSES_BASE_URL if info.get("mode") == "openai_api_key" else CODEX_BASE_URL
     upstream_request = http_client.build_request(
         "POST",
-        f"{CODEX_BASE_URL}/responses",
+        f"{base_url}/responses",
         headers=await upstream_headers(request),
         json=payload,
     )
@@ -622,7 +776,26 @@ async def sse_events(response: httpx.Response):
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    return {"status": "ok", "service": APP_NAME, "models": MODEL_IDS, "codex_client_version": codex_client_version()}
+    try:
+        info = await load_auth_info()
+        auth_mode = info.get("mode", "unavailable")
+    except Exception:
+        auth_mode = "unavailable"
+    return {
+        "status": "ok",
+        "service": APP_NAME,
+        "models": MODEL_IDS,
+        "codex_client_version": codex_client_version(),
+        "auth_mode": auth_mode,
+        "openai_api_key_fallback": auth_mode == "openai_api_key",
+        "chat_field_mapping": {
+            "tools": "responses.tools",
+            "tool_choice": "responses.tool_choice",
+            "max_tokens": "responses.max_output_tokens",
+            "response_format": "responses.text.format",
+            "reasoning_effort": "responses.reasoning.effort",
+        },
+    }
 
 
 @app.get("/v1/models")
@@ -730,7 +903,7 @@ async def responses_endpoint(request: Request) -> Response:
     payload["instructions"] = payload.get("instructions") or "You are a helpful coding assistant. Follow the user's instructions."
     client_wants_stream = bool(payload.get("stream"))
     payload["stream"] = True
-    payload["store"] = False
+    payload.setdefault("store", False)
 
     response = await send_upstream(payload, request)
     if response.status_code >= 400:
