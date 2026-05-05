@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import os
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -49,6 +53,13 @@ NO_SESSION_PERSISTENCE = os.environ.get("CLAUDE_NO_SESSION_PERSISTENCE", "1").st
 BARE_MODE = os.environ.get("CLAUDE_BARE", "").strip().lower() in {"1", "true", "yes", "on"}
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 EFFORT_ALIASES = {"minimal": "low"}
+IMAGE_EXTENSIONS = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
 
 
 def default_model_catalog() -> list[str]:
@@ -129,6 +140,28 @@ def json_for_prompt(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2)
 
 
+def image_suffix(media_type: str | None) -> str:
+    return IMAGE_EXTENSIONS.get(str(media_type or "").lower(), ".img")
+
+
+def write_image_block(block: dict[str, Any], directory: str, index: int) -> str | None:
+    source = block.get("source")
+    if not isinstance(source, dict):
+        return None
+    if source.get("type") != "base64":
+        return None
+    data = source.get("data")
+    if not isinstance(data, str) or not data:
+        return None
+    try:
+        image_bytes = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    path = Path(directory) / f"image_{index}{image_suffix(source.get('media_type'))}"
+    path.write_bytes(image_bytes)
+    return str(path)
+
+
 def split_env_items(value: str, separator: str = ",") -> list[str]:
     return [item.strip() for item in value.split(separator) if item.strip()]
 
@@ -165,8 +198,9 @@ def api_config_to_prompt(payload: dict[str, Any]) -> str:
     return "\n".join(guidance)
 
 
-def messages_to_prompt(payload: dict[str, Any]) -> str:
+def messages_to_prompt(payload: dict[str, Any], image_dir: str | None = None) -> str:
     chunks: list[str] = []
+    image_index = 0
     system = payload.get("system")
     if isinstance(system, str) and system:
         chunks.append(f"System:\n{system}")
@@ -189,6 +223,17 @@ def messages_to_prompt(payload: dict[str, Any]) -> str:
                 if isinstance(block, dict):
                     if block.get("type") == "text":
                         chunks.append(f"{role.title()}:\n{block.get('text', '')}")
+                    elif block.get("type") == "image":
+                        image_index += 1
+                        image_path = write_image_block(block, image_dir, image_index) if image_dir else None
+                        if image_path:
+                            chunks.append(f"{role.title()} [image {image_index} file; use Read to inspect]:\n{image_path}")
+                        elif isinstance(block.get("source"), dict) and block["source"].get("type") == "url":
+                            chunks.append(f"{role.title()} [image {image_index} url]:\n{block['source'].get('url', '')}")
+                        elif isinstance(block.get("source"), dict) and block["source"].get("type") == "file":
+                            chunks.append(f"{role.title()} [image {image_index} file_id]:\n{block['source'].get('file_id', '')}")
+                        else:
+                            chunks.append(f"{role.title()} [image {image_index}]:\n{json_for_prompt({k: v for k, v in block.items() if k != 'source'})}")
                     elif block.get("type") == "tool_use":
                         chunks.append(
                             f"{role.title()} [tool_use {block.get('name', '')}]:\n"
@@ -341,14 +386,16 @@ def claude_command(
         command.extend(shlex.split(EXTRA_ARGS))
     if MAX_TURNS:
         command.extend(["--max-turns", MAX_TURNS])
-    command.append(prompt)
+    if prompt:
+        command.append(prompt)
     return command
 
 
 def run_claude_json(prompt: str, model: str, effort: str | None = None, max_tokens: int | None = None) -> dict[str, Any]:
-    command = claude_command(prompt, model, "json", effort=effort, max_tokens=max_tokens)
+    command = claude_command("", model, "json", effort=effort, max_tokens=max_tokens)
     completed = subprocess.run(
         command,
+        input=prompt,
         env=claude_env(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -369,14 +416,19 @@ def run_claude_json(prompt: str, model: str, effort: str | None = None, max_toke
 
 
 def run_claude_streaming(prompt: str, model: str, effort: str | None = None) -> subprocess.Popen:
-    command = claude_command(prompt, model, "stream-json", effort=effort, verbose=True)
-    return subprocess.Popen(
+    command = claude_command("", model, "stream-json", effort=effort, verbose=True)
+    process = subprocess.Popen(
         command,
         env=claude_env(),
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
+    assert process.stdin is not None
+    process.stdin.write(prompt)
+    process.stdin.close()
+    return process
 
 
 def parse_claude_json_to_content(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -451,14 +503,15 @@ async def messages(
     payload = await request.json()
     model_raw = payload.get("model") or "claude-code"
     model, effort = resolve_model_request(model_raw, payload)
-    prompt = messages_to_prompt(payload)
     max_tokens = payload.get("max_tokens")
     wants_stream = payload.get("stream", False)
 
     if wants_stream:
-        return await _stream_messages(prompt, model, model_raw, effort, max_tokens)
+        return await _stream_messages(payload, model, model_raw, effort, max_tokens)
 
-    result = await asyncio.to_thread(run_claude_json, prompt, model, effort, max_tokens)
+    with tempfile.TemporaryDirectory(prefix="claude-proxy-images-") as image_dir:
+        prompt = messages_to_prompt(payload, image_dir)
+        result = await asyncio.to_thread(run_claude_json, prompt, model, effort, max_tokens)
     content_blocks = parse_claude_json_to_content(result)
     all_text = " ".join(
         b.get("text", "") for b in content_blocks if b.get("type") == "text"
@@ -487,111 +540,113 @@ async def messages(
 
 
 async def _stream_messages(
-    prompt: str, model: str, model_raw: str, effort: str | None, max_tokens: int | None
+    payload: dict[str, Any], model: str, model_raw: str, effort: str | None, max_tokens: int | None
 ) -> StreamingResponse:
     msg_id = f"msg_{uuid.uuid4().hex}"
     _ = max_tokens
 
     async def iterator():
-        event_data = {
-            "type": "message_start",
-            "message": {
-                "id": msg_id,
-                "type": "message",
-                "role": "assistant",
-                "model": model_raw,
-                "content": [],
-                "stop_reason": None,
-                "stop_sequence": None,
-                "usage": {"input_tokens": estimate_tokens(prompt), "output_tokens": 0},
-            },
-        }
-        yield f"event: message_start\ndata: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+        with tempfile.TemporaryDirectory(prefix="claude-proxy-images-") as image_dir:
+            prompt = messages_to_prompt(payload, image_dir)
+            event_data = {
+                "type": "message_start",
+                "message": {
+                    "id": msg_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": model_raw,
+                    "content": [],
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": estimate_tokens(prompt), "output_tokens": 0},
+                },
+            }
+            yield f"event: message_start\ndata: {json.dumps(event_data, ensure_ascii=False)}\n\n"
 
-        process = await asyncio.to_thread(run_claude_streaming, prompt, model, effort)
-        block_index = 0
-        total_output = 0
-        block_open = False
-        result_usage: dict[str, Any] = {}
-        stop_reason = "end_turn"
+            process = await asyncio.to_thread(run_claude_streaming, prompt, model, effort)
+            block_index = 0
+            total_output = 0
+            block_open = False
+            result_usage: dict[str, Any] = {}
+            stop_reason = "end_turn"
 
-        try:
-            for raw_line in iter(process.stdout.readline, ""):  # type: ignore[union-attr]
-                raw_line = raw_line.strip()
-                if not raw_line:
-                    continue
-                try:
-                    event = json.loads(raw_line)
-                except json.JSONDecodeError:
-                    continue
+            try:
+                for raw_line in iter(process.stdout.readline, ""):  # type: ignore[union-attr]
+                    raw_line = raw_line.strip()
+                    if not raw_line:
+                        continue
+                    try:
+                        event = json.loads(raw_line)
+                    except json.JSONDecodeError:
+                        continue
 
-                event_type = event.get("type", "")
+                    event_type = event.get("type", "")
 
-                if event_type == "assistant":
-                    message = event.get("message", {})
-                    content_blocks = message.get("content", [])
-                    for block in content_blocks:
-                        if not isinstance(block, dict):
-                            continue
-                        btype = block.get("type")
-
-                        if btype == "text":
-                            text = block.get("text", "")
-                            if not text:
+                    if event_type == "assistant":
+                        message = event.get("message", {})
+                        content_blocks = message.get("content", [])
+                        for block in content_blocks:
+                            if not isinstance(block, dict):
                                 continue
-                            if block_open:
-                                yield _sse("content_block_stop", {"type": "content_block_stop", "index": block_index})
-                                block_index += 1
-                            yield _sse("content_block_start", {"type": "content_block_start", "index": block_index, "content_block": {"type": "text", "text": ""}})
-                            block_open = True
-                            yield _sse("content_block_delta", {"type": "content_block_delta", "index": block_index, "delta": {"type": "text_delta", "text": text}})
-                            total_output += len(text)
+                            btype = block.get("type")
 
-                        elif btype == "tool_use":
-                            if block_open:
-                                yield _sse("content_block_stop", {"type": "content_block_stop", "index": block_index})
-                                block_index += 1
-                            tool_block = {
-                                "type": "tool_use",
-                                "id": block.get("id", f"toolu_{uuid.uuid4().hex}"),
-                                "name": block.get("name", ""),
-                                "input": {},
-                            }
-                            yield _sse("content_block_start", {"type": "content_block_start", "index": block_index, "content_block": tool_block})
-                            block_open = True
-                            input_json = json.dumps(block.get("input", {}), ensure_ascii=False)
-                            yield _sse("content_block_delta", {"type": "content_block_delta", "index": block_index, "delta": {"type": "input_json_delta", "partial_json": input_json}})
-                            stop_reason = "tool_use"
+                            if btype == "text":
+                                text = block.get("text", "")
+                                if not text:
+                                    continue
+                                if block_open:
+                                    yield _sse("content_block_stop", {"type": "content_block_stop", "index": block_index})
+                                    block_index += 1
+                                yield _sse("content_block_start", {"type": "content_block_start", "index": block_index, "content_block": {"type": "text", "text": ""}})
+                                block_open = True
+                                yield _sse("content_block_delta", {"type": "content_block_delta", "index": block_index, "delta": {"type": "text_delta", "text": text}})
+                                total_output += len(text)
 
-                elif event_type == "result":
-                    usage = event.get("usage", {})
-                    result_usage = {
-                        "input_tokens": usage.get("input_tokens", 0),
-                        "output_tokens": usage.get("output_tokens", 0),
-                    }
-                    if event.get("stop_reason"):
-                        stop_reason = event["stop_reason"]
+                            elif btype == "tool_use":
+                                if block_open:
+                                    yield _sse("content_block_stop", {"type": "content_block_stop", "index": block_index})
+                                    block_index += 1
+                                tool_block = {
+                                    "type": "tool_use",
+                                    "id": block.get("id", f"toolu_{uuid.uuid4().hex}"),
+                                    "name": block.get("name", ""),
+                                    "input": {},
+                                }
+                                yield _sse("content_block_start", {"type": "content_block_start", "index": block_index, "content_block": tool_block})
+                                block_open = True
+                                input_json = json.dumps(block.get("input", {}), ensure_ascii=False)
+                                yield _sse("content_block_delta", {"type": "content_block_delta", "index": block_index, "delta": {"type": "input_json_delta", "partial_json": input_json}})
+                                stop_reason = "tool_use"
 
-            process.wait(timeout=10)
-        except Exception:
-            process.kill()
-        finally:
-            if process.poll() is None:
+                    elif event_type == "result":
+                        usage = event.get("usage", {})
+                        result_usage = {
+                            "input_tokens": usage.get("input_tokens", 0),
+                            "output_tokens": usage.get("output_tokens", 0),
+                        }
+                        if event.get("stop_reason"):
+                            stop_reason = event["stop_reason"]
+
+                process.wait(timeout=10)
+            except Exception:
                 process.kill()
+            finally:
+                if process.poll() is None:
+                    process.kill()
 
-        if block_open:
-            yield _sse("content_block_stop", {"type": "content_block_stop", "index": block_index})
-        elif block_index == 0:
-            yield _sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
-            yield _sse("content_block_stop", {"type": "content_block_stop", "index": 0})
+            if block_open:
+                yield _sse("content_block_stop", {"type": "content_block_stop", "index": block_index})
+            elif block_index == 0:
+                yield _sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+                yield _sse("content_block_stop", {"type": "content_block_stop", "index": 0})
 
-        out_tokens = result_usage.get("output_tokens") or estimate_tokens("x" * total_output)
-        yield _sse("message_delta", {
-            "type": "message_delta",
-            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-            "usage": {"output_tokens": out_tokens},
-        })
-        yield "event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"
+            out_tokens = result_usage.get("output_tokens") or estimate_tokens("x" * total_output)
+            yield _sse("message_delta", {
+                "type": "message_delta",
+                "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                "usage": {"output_tokens": out_tokens},
+            })
+            yield "event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"
 
     return StreamingResponse(iterator(), media_type="text/event-stream")
 

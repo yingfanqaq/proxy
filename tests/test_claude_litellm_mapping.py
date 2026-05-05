@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
 from pathlib import Path
 
@@ -63,6 +64,64 @@ def test_api_config_prompt_preserves_anthropic_controls():
     assert '"cache_control"' in prompt
     assert '"inference_geo"' in prompt
     assert "WebSearch/WebFetch" in prompt
+
+
+def test_messages_to_prompt_writes_images_to_files(tmp_path):
+    image_data = base64.b64encode(b"fake-png").decode()
+    prompt = app.messages_to_prompt({
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": image_data,
+                    },
+                },
+            ],
+        }],
+    }, str(tmp_path))
+    image_path = tmp_path / "image_1.png"
+    assert "describe" in prompt
+    assert str(image_path) in prompt
+    assert image_path.read_bytes() == b"fake-png"
+    assert image_data not in prompt
+
+
+def test_messages_to_prompt_preserves_image_url_without_source_dump():
+    prompt = app.messages_to_prompt({
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "image",
+                "source": {"type": "url", "url": "https://example.com/image.png"},
+            }],
+        }],
+    })
+    assert "https://example.com/image.png" in prompt
+    assert '"source"' not in prompt
+
+
+def test_claude_json_uses_stdin_instead_of_prompt_argument(monkeypatch):
+    captured = {}
+
+    class Completed:
+        returncode = 0
+        stdout = '{"result":"ok"}'
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["input"] = kwargs.get("input")
+        return Completed()
+
+    monkeypatch.setattr(app.subprocess, "run", fake_run)
+    assert app.run_claude_json("x" * 2_000_000, "sonnet")["result"] == "ok"
+    assert captured["input"] == "x" * 2_000_000
+    assert "x" * 1000 not in captured["command"]
 
 
 def test_litellm_config_keeps_alias_for_claude_proxy(tmp_path, monkeypatch):
