@@ -4,6 +4,7 @@ import asyncio
 import base64
 import binascii
 import json
+import logging
 import os
 import shlex
 import shutil
@@ -20,6 +21,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 
 APP_NAME = "claude-code-proxy"
+logging.basicConfig(level=os.environ.get("CLAUDE_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
+LOGGER = logging.getLogger(APP_NAME)
 API_KEY = os.environ.get("CLAUDE_PROXY_API_KEY", "claude-proxy-local-key")
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "39123"))
@@ -51,6 +54,7 @@ STRICT_MCP_CONFIG = os.environ.get("CLAUDE_STRICT_MCP_CONFIG", "").strip().lower
 DANGEROUSLY_SKIP_PERMISSIONS = os.environ.get("CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS", "").strip().lower() in {"1", "true", "yes", "on"}
 NO_SESSION_PERSISTENCE = os.environ.get("CLAUDE_NO_SESSION_PERSISTENCE", "1").strip().lower() in {"1", "true", "yes", "on"}
 BARE_MODE = os.environ.get("CLAUDE_BARE", "").strip().lower() in {"1", "true", "yes", "on"}
+INCLUDE_PARTIAL_MESSAGES = os.environ.get("CLAUDE_INCLUDE_PARTIAL_MESSAGES", "1").strip().lower() in {"1", "true", "yes", "on"}
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 EFFORT_ALIASES = {"minimal": "low"}
 IMAGE_EXTENSIONS = {
@@ -120,6 +124,47 @@ def require_auth(authorization: str | None, x_api_key: str | None) -> None:
         token = x_api_key
     if token != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+def now_ms() -> int:
+    return int(time.perf_counter() * 1000)
+
+
+def elapsed_ms(start_ms: int) -> int:
+    return now_ms() - start_ms
+
+
+def truncate_detail(value: str, limit: int = 2000) -> str:
+    value = value.strip()
+    if len(value) <= limit:
+        return value
+    return value[:limit] + f"... <truncated {len(value) - limit} chars>"
+
+
+def payload_stats(payload: dict[str, Any]) -> dict[str, int]:
+    messages = payload.get("messages", [])
+    text_chars = 0
+    images = 0
+    tool_results = 0
+    if isinstance(messages, list):
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                text_chars += len(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, str):
+                        text_chars += len(block)
+                    elif isinstance(block, dict):
+                        if block.get("type") == "text":
+                            text_chars += len(str(block.get("text", "")))
+                        elif block.get("type") == "image":
+                            images += 1
+                        elif block.get("type") == "tool_result":
+                            tool_results += 1
+    return {"messages": len(messages) if isinstance(messages, list) else 0, "text_chars": text_chars, "images": images, "tool_results": tool_results}
 
 
 def content_to_text(content: Any) -> str:
@@ -342,6 +387,8 @@ def claude_command(
     command.extend(["--output-format", output_format])
     if verbose:
         command.append("--verbose")
+    if output_format == "stream-json" and INCLUDE_PARTIAL_MESSAGES:
+        command.append("--include-partial-messages")
     if BARE_MODE:
         command.append("--bare")
     if NO_SESSION_PERSISTENCE:
@@ -391,16 +438,36 @@ def claude_command(
     return command
 
 
-def run_claude_json(prompt: str, model: str, effort: str | None = None, max_tokens: int | None = None) -> dict[str, Any]:
+def run_claude_json(
+    prompt: str,
+    model: str,
+    effort: str | None = None,
+    max_tokens: int | None = None,
+    request_id: str = "-",
+) -> dict[str, Any]:
     command = claude_command("", model, "json", effort=effort, max_tokens=max_tokens)
-    completed = subprocess.run(
-        command,
-        input=prompt,
-        env=claude_env(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=CLAUDE_TIMEOUT,
+    start_ms = now_ms()
+    LOGGER.info("claude_request id=%s phase=cli_start mode=json model=%s effort=%s prompt_chars=%s", request_id, model, effort or "", len(prompt))
+    try:
+        completed = subprocess.run(
+            command,
+            input=prompt,
+            env=claude_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=CLAUDE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        LOGGER.warning("claude_request id=%s phase=cli_timeout elapsed_ms=%s timeout=%s", request_id, elapsed_ms(start_ms), CLAUDE_TIMEOUT)
+        raise HTTPException(status_code=504, detail=f"claude timed out after {CLAUDE_TIMEOUT}s") from exc
+    LOGGER.info(
+        "claude_request id=%s phase=cli_done mode=json elapsed_ms=%s returncode=%s stdout_chars=%s stderr_chars=%s",
+        request_id,
+        elapsed_ms(start_ms),
+        completed.returncode,
+        len(completed.stdout or ""),
+        len(completed.stderr or ""),
     )
     if completed.returncode != 0:
         detail = (
@@ -408,6 +475,7 @@ def run_claude_json(prompt: str, model: str, effort: str | None = None, max_toke
             or completed.stdout.strip()
             or f"claude exited with {completed.returncode}"
         )
+        LOGGER.warning("claude_request id=%s phase=cli_error detail=%s", request_id, truncate_detail(detail))
         raise HTTPException(status_code=502, detail=detail)
     try:
         return json.loads(completed.stdout)
@@ -415,8 +483,9 @@ def run_claude_json(prompt: str, model: str, effort: str | None = None, max_toke
         return {"result": completed.stdout.strip(), "is_text": True}
 
 
-def run_claude_streaming(prompt: str, model: str, effort: str | None = None) -> subprocess.Popen:
+def run_claude_streaming(prompt: str, model: str, effort: str | None = None, request_id: str = "-") -> subprocess.Popen:
     command = claude_command("", model, "stream-json", effort=effort, verbose=True)
+    LOGGER.info("claude_request id=%s phase=cli_start mode=stream model=%s effort=%s prompt_chars=%s", request_id, model, effort or "", len(prompt))
     process = subprocess.Popen(
         command,
         env=claude_env(),
@@ -500,18 +569,35 @@ async def messages(
     x_api_key: str | None = Header(None),
 ):
     require_auth(authorization, x_api_key)
+    request_id = uuid.uuid4().hex[:12]
+    request_start_ms = now_ms()
     payload = await request.json()
     model_raw = payload.get("model") or "claude-code"
     model, effort = resolve_model_request(model_raw, payload)
     max_tokens = payload.get("max_tokens")
     wants_stream = payload.get("stream", False)
+    stats = payload_stats(payload)
+    LOGGER.info(
+        "claude_request id=%s phase=request_start stream=%s model_raw=%s model=%s effort=%s messages=%s images=%s text_chars=%s tool_results=%s",
+        request_id,
+        bool(wants_stream),
+        model_raw,
+        model,
+        effort or "",
+        stats["messages"],
+        stats["images"],
+        stats["text_chars"],
+        stats["tool_results"],
+    )
 
     if wants_stream:
-        return await _stream_messages(payload, model, model_raw, effort, max_tokens)
+        return await _stream_messages(payload, model, model_raw, effort, max_tokens, request_id, request_start_ms)
 
     with tempfile.TemporaryDirectory(prefix="claude-proxy-images-") as image_dir:
+        prompt_start_ms = now_ms()
         prompt = messages_to_prompt(payload, image_dir)
-        result = await asyncio.to_thread(run_claude_json, prompt, model, effort, max_tokens)
+        LOGGER.info("claude_request id=%s phase=prompt_ready elapsed_ms=%s prompt_chars=%s", request_id, elapsed_ms(prompt_start_ms), len(prompt))
+        result = await asyncio.to_thread(run_claude_json, prompt, model, effort, max_tokens, request_id)
     content_blocks = parse_claude_json_to_content(result)
     all_text = " ".join(
         b.get("text", "") for b in content_blocks if b.get("type") == "text"
@@ -536,18 +622,27 @@ async def messages(
             "output_tokens": usage.get("output_tokens") or estimate_tokens(all_text),
         },
     }
+    LOGGER.info("claude_request id=%s phase=request_done mode=json elapsed_ms=%s stop_reason=%s", request_id, elapsed_ms(request_start_ms), stop_reason)
     return JSONResponse(response)
 
 
 async def _stream_messages(
-    payload: dict[str, Any], model: str, model_raw: str, effort: str | None, max_tokens: int | None
+    payload: dict[str, Any],
+    model: str,
+    model_raw: str,
+    effort: str | None,
+    max_tokens: int | None,
+    request_id: str,
+    request_start_ms: int,
 ) -> StreamingResponse:
     msg_id = f"msg_{uuid.uuid4().hex}"
     _ = max_tokens
 
     async def iterator():
         with tempfile.TemporaryDirectory(prefix="claude-proxy-images-") as image_dir:
+            prompt_start_ms = now_ms()
             prompt = messages_to_prompt(payload, image_dir)
+            LOGGER.info("claude_request id=%s phase=prompt_ready elapsed_ms=%s prompt_chars=%s", request_id, elapsed_ms(prompt_start_ms), len(prompt))
             event_data = {
                 "type": "message_start",
                 "message": {
@@ -563,10 +658,13 @@ async def _stream_messages(
             }
             yield f"event: message_start\ndata: {json.dumps(event_data, ensure_ascii=False)}\n\n"
 
-            process = await asyncio.to_thread(run_claude_streaming, prompt, model, effort)
+            stream_start_ms = now_ms()
+            process = await asyncio.to_thread(run_claude_streaming, prompt, model, effort, request_id)
             block_index = 0
             total_output = 0
             block_open = False
+            first_output_logged = False
+            saw_stream_content = False
             result_usage: dict[str, Any] = {}
             stop_reason = "end_turn"
 
@@ -581,8 +679,46 @@ async def _stream_messages(
                         continue
 
                     event_type = event.get("type", "")
+                    if event_type == "stream_event":
+                        inner = event.get("event", {})
+                        if isinstance(inner, dict):
+                            event = inner
+                            event_type = event.get("type", "")
 
-                    if event_type == "assistant":
+                    if event_type == "content_block_start":
+                        if block_open:
+                            yield _sse("content_block_stop", {"type": "content_block_stop", "index": block_index})
+                            block_index += 1
+                        content_block = event.get("content_block") or {"type": "text", "text": ""}
+                        yield _sse("content_block_start", {"type": "content_block_start", "index": block_index, "content_block": content_block})
+                        block_open = True
+                        saw_stream_content = True
+
+                    elif event_type == "content_block_delta":
+                        delta = event.get("delta", {})
+                        if isinstance(delta, dict):
+                            yield _sse("content_block_delta", {"type": "content_block_delta", "index": event.get("index", block_index), "delta": delta})
+                            if delta.get("type") == "text_delta":
+                                text_delta = str(delta.get("text", ""))
+                                total_output += len(text_delta)
+                                if text_delta and not first_output_logged:
+                                    first_output_logged = True
+                                    LOGGER.info("claude_request id=%s phase=first_output elapsed_ms=%s", request_id, elapsed_ms(stream_start_ms))
+                            saw_stream_content = True
+
+                    elif event_type == "content_block_stop":
+                        if block_open:
+                            yield _sse("content_block_stop", {"type": "content_block_stop", "index": event.get("index", block_index)})
+                            block_open = False
+                            block_index += 1
+                        saw_stream_content = True
+
+                    elif event_type == "message_delta":
+                        delta = event.get("delta", {})
+                        if isinstance(delta, dict) and delta.get("stop_reason"):
+                            stop_reason = delta["stop_reason"]
+
+                    elif event_type == "assistant" and not saw_stream_content:
                         message = event.get("message", {})
                         content_blocks = message.get("content", [])
                         for block in content_blocks:
@@ -600,6 +736,9 @@ async def _stream_messages(
                                 yield _sse("content_block_start", {"type": "content_block_start", "index": block_index, "content_block": {"type": "text", "text": ""}})
                                 block_open = True
                                 yield _sse("content_block_delta", {"type": "content_block_delta", "index": block_index, "delta": {"type": "text_delta", "text": text}})
+                                if not first_output_logged:
+                                    first_output_logged = True
+                                    LOGGER.info("claude_request id=%s phase=first_output elapsed_ms=%s", request_id, elapsed_ms(stream_start_ms))
                                 total_output += len(text)
 
                             elif btype == "tool_use":
@@ -628,7 +767,18 @@ async def _stream_messages(
                             stop_reason = event["stop_reason"]
 
                 process.wait(timeout=10)
-            except Exception:
+                stderr = process.stderr.read() if process.stderr else ""
+                LOGGER.info(
+                    "claude_request id=%s phase=cli_done mode=stream elapsed_ms=%s returncode=%s stderr_chars=%s",
+                    request_id,
+                    elapsed_ms(stream_start_ms),
+                    process.returncode,
+                    len(stderr or ""),
+                )
+                if process.returncode not in (0, None):
+                    LOGGER.warning("claude_request id=%s phase=cli_error detail=%s", request_id, truncate_detail(stderr or f"claude exited with {process.returncode}"))
+            except Exception as exc:
+                LOGGER.exception("claude_request id=%s phase=stream_exception error=%s", request_id, exc)
                 process.kill()
             finally:
                 if process.poll() is None:
@@ -647,6 +797,7 @@ async def _stream_messages(
                 "usage": {"output_tokens": out_tokens},
             })
             yield "event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"
+            LOGGER.info("claude_request id=%s phase=request_done mode=stream elapsed_ms=%s stop_reason=%s", request_id, elapsed_ms(request_start_ms), stop_reason)
 
     return StreamingResponse(iterator(), media_type="text/event-stream")
 

@@ -265,6 +265,12 @@ def _wait_for_health(url: str, expected: bool, attempts: int = 40) -> bool:
     return False
 
 
+def _bootout_launchd_service(label: str, plist_path: Path) -> None:
+    domain = f"gui/{os.getuid()}"
+    _ = label
+    subprocess.run(["launchctl", "bootout", domain, str(plist_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def _start_process(spec: ServiceSpec, attempts: int, extra: dict[str, object] | None = None) -> dict[str, object]:
     spec.log_path.parent.mkdir(parents=True, exist_ok=True)
     spec.pid_path.parent.mkdir(parents=True, exist_ok=True)
@@ -319,9 +325,23 @@ def start_service(name: str, config: ProxyConfig | None = None) -> dict[str, obj
         healthy = _wait_for_health(spec.health_url, True, attempts=attempts)
         if healthy:
             return {"name": name, "started": True, "healthy": True, "via": "launchd", "log": str(spec.log_path)}
+        _bootout_launchd_service(label, plist_path)
         if not port_open(cfg.host, spec.port):
-            return _start_process(spec, attempts, {"via": "subprocess", "launchd_unhealthy": True})
-        return {"name": name, "started": False, "healthy": False, "via": "launchd", "log": str(spec.log_path)}
+            return _start_process(spec, attempts, {"via": "subprocess", "launchd_unhealthy": True, "launchd_booted_out": True})
+        detected_pid = listen_pid(spec.port)
+        if detected_pid and health_ok(spec.health_url):
+            spec.pid_path.write_text(str(detected_pid), encoding="utf-8")
+            return {
+                "name": name,
+                "started": False,
+                "healthy": True,
+                "pid": detected_pid,
+                "via": "existing-port",
+                "launchd_unhealthy": True,
+                "launchd_booted_out": True,
+                "log": str(spec.log_path),
+            }
+        return {"name": name, "started": False, "healthy": False, "via": "launchd", "launchd_booted_out": True, "log": str(spec.log_path)}
     attempts = 100 if name.startswith("litellm") else 30
     return _start_process(spec, attempts)
 
@@ -358,9 +378,8 @@ def stop_service(name: str, config: ProxyConfig | None = None) -> dict[str, obje
         spec.pid_path.unlink(missing_ok=True)
         launchd = _mac_launchd_service_path(name)
         if launchd and launchd[1].exists():
-            _label, plist_path = launchd
-            domain = f"gui/{os.getuid()}"
-            subprocess.run(["launchctl", "bootout", domain, str(plist_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            label, plist_path = launchd
+            _bootout_launchd_service(label, plist_path)
             stopped = _wait_for_health(spec.health_url, False, attempts=20)
             return {"name": name, "stopped": stopped, "via": "launchd"}
         return {"name": name, "stopped": False, "reason": "not running"}
@@ -381,6 +400,10 @@ def stop_service(name: str, config: ProxyConfig | None = None) -> dict[str, obje
         except ProcessLookupError:
             pass
     spec.pid_path.unlink(missing_ok=True)
+    launchd = _mac_launchd_service_path(name)
+    if launchd and launchd[1].exists():
+        label, plist_path = launchd
+        _bootout_launchd_service(label, plist_path)
     return {"name": name, "stopped": True, "pid": pid}
 
 

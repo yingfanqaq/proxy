@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from collections import defaultdict
 from copy import deepcopy
@@ -200,6 +201,7 @@ def litellm_env_for_port(config: ProxyConfig, port: int) -> dict[str, str]:
         "GEMINI_PROXY_API_KEY": config.gemini_proxy_api_key,
         "CLAUDE_PROXY_API_KEY": config.claude_proxy_api_key,
         "LITELLM_MASTER_KEY": output_api_key(config, port),
+        "REQUEST_TIMEOUT": str(litellm_request_timeout()),
     }
     for flow in enabled_flows_for_port(config, port):
         details = source_details(config, flow)
@@ -225,8 +227,16 @@ def output_formats_for_port(config: ProxyConfig, port: int) -> list[str]:
     return sorted(formats or {"anthropic"})
 
 
+def litellm_request_timeout() -> int:
+    try:
+        return max(600, int(os.environ.get("CLAUDE_TIMEOUT", "900")))
+    except ValueError:
+        return 900
+
+
 def generate_litellm_config_for_port(config: ProxyConfig, port: int) -> Path:
     path = runtime_dir() / f"litellm-flow-{port}.generated.yaml"
+    request_timeout = litellm_request_timeout()
     lines: list[str] = ["model_list:"]
     for flow in enabled_flows_for_port(config, port):
         details = source_details(config, flow)
@@ -243,6 +253,8 @@ def generate_litellm_config_for_port(config: ProxyConfig, port: int) -> Path:
                     f"      model: {prefix}/{upstream}",
                     f"      api_base: {details['api_base']}",
                     f"      api_key: {details['api_key_ref']}",
+                    f"      timeout: {request_timeout}",
+                    f"      stream_timeout: {request_timeout}",
                 ]
             )
             lines.append("")
@@ -254,6 +266,8 @@ def generate_litellm_config_for_port(config: ProxyConfig, port: int) -> Path:
                 "      model: openai/empty-flow-placeholder",
                 "      api_base: http://127.0.0.1:1/v1",
                 "      api_key: none",
+                f"      timeout: {request_timeout}",
+                f"      stream_timeout: {request_timeout}",
                 "",
             ]
         )
@@ -262,8 +276,13 @@ def generate_litellm_config_for_port(config: ProxyConfig, port: int) -> Path:
             "general_settings:",
             "  master_key: os.environ/LITELLM_MASTER_KEY",
             "",
+            "router_settings:",
+            f"  timeout: {request_timeout}",
+            f"  stream_timeout: {request_timeout}",
+            "",
             "litellm_settings:",
             "  drop_params: true",
+            f"  request_timeout: {request_timeout}",
             "",
         ]
     )

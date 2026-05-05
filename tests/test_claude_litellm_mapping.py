@@ -43,6 +43,11 @@ def test_claude_command_allows_web_tools():
     assert command[command.index("--max-turns") + 1] == "8"
 
 
+def test_claude_stream_command_includes_partial_messages():
+    command = app.claude_command("", "sonnet", "stream-json", verbose=True)
+    assert "--include-partial-messages" in command
+
+
 def test_api_config_prompt_preserves_anthropic_controls():
     prompt = app.api_config_to_prompt({
         "max_tokens": 50,
@@ -139,6 +144,9 @@ def test_litellm_config_keeps_alias_for_claude_proxy(tmp_path, monkeypatch):
     assert "model_name: claude-code-opus-4-7-xhigh" in text
     assert "model: anthropic/claude-code-opus-4-7-xhigh" in text
     assert "api_base: http://127.0.0.1:39123" in text
+    assert "timeout: 900" in text
+    assert "stream_timeout: 900" in text
+    assert "request_timeout: 900" in text
 
 
 def test_litellm_config_keeps_each_local_provider_isolated(tmp_path, monkeypatch):

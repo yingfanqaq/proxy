@@ -69,6 +69,38 @@ def test_start_service_falls_back_when_launchd_did_not_open_port(tmp_path, monke
     assert calls
 
 
+
+def test_start_service_boots_out_launchd_when_existing_port_is_healthy(tmp_path, monkeypatch):
+    calls: list[tuple[object, ...]] = []
+    spec = manager.ServiceSpec(
+        name="claude",
+        port=39123,
+        health_url="http://127.0.0.1:39123/health",
+        log_path=tmp_path / "claude.log",
+        pid_path=tmp_path / "claude.pid",
+        cwd=tmp_path,
+        command=["python", "app.py"],
+        env={},
+    )
+
+    monkeypatch.setattr(manager, "status", lambda _cfg: {"claude": {"healthy": False}})
+    monkeypatch.setattr(manager, "service_spec", lambda _name, _cfg: spec)
+    monkeypatch.setattr(manager, "_mac_launchd_service_path", lambda _name: ("label", tmp_path / "service.plist"))
+    (tmp_path / "service.plist").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(manager.subprocess, "run", lambda *args, **kwargs: calls.append(args))
+    monkeypatch.setattr(manager, "_wait_for_health", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(manager, "port_open", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(manager, "listen_pid", lambda _port: 12345)
+    monkeypatch.setattr(manager, "health_ok", lambda *_args, **_kwargs: True)
+
+    result = manager.start_service("claude", ProxyConfig())
+    assert result["healthy"] is True
+    assert result["via"] == "existing-port"
+    assert result["launchd_booted_out"] is True
+    assert spec.pid_path.read_text(encoding="utf-8") == "12345"
+    assert any(call[0][0] == "launchctl" and call[0][1] == "bootout" for call in calls)
+
+
 def test_litellm_config_uses_custom_local_proxy_port(tmp_path, monkeypatch):
     monkeypatch.setattr("proxy_stack.flows.runtime_dir", lambda: tmp_path)
     cfg = ProxyConfig(
