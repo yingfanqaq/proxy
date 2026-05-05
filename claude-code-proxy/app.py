@@ -521,6 +521,14 @@ def estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def _stream_event_index(event: dict[str, Any], fallback: int) -> int:
+    value = event.get("index", fallback)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return {
@@ -662,11 +670,17 @@ async def _stream_messages(
             process = await asyncio.to_thread(run_claude_streaming, prompt, model, effort, request_id)
             block_index = 0
             total_output = 0
-            block_open = False
+            active_external_index: int | None = None
+            index_map: dict[int, int] = {}
+            block_types: dict[int, str] = {}
             first_output_logged = False
             saw_stream_content = False
             result_usage: dict[str, Any] = {}
             stop_reason = "end_turn"
+            skipped_blocks = 0
+            forwarded_blocks = 0
+            text_delta_chunks = 0
+            input_json_delta_chunks = 0
 
             try:
                 for raw_line in iter(process.stdout.readline, ""):  # type: ignore[union-attr]
@@ -686,19 +700,60 @@ async def _stream_messages(
                             event_type = event.get("type", "")
 
                     if event_type == "content_block_start":
-                        if block_open:
-                            yield _sse("content_block_stop", {"type": "content_block_stop", "index": block_index})
-                            block_index += 1
                         content_block = event.get("content_block") or {"type": "text", "text": ""}
-                        yield _sse("content_block_start", {"type": "content_block_start", "index": block_index, "content_block": content_block})
-                        block_open = True
+                        if not isinstance(content_block, dict):
+                            content_block = {"type": "text", "text": ""}
+                        internal_index = _stream_event_index(event, block_index)
+                        block_type = str(content_block.get("type") or "text")
+                        if block_type in {"thinking", "redacted_thinking"}:
+                            block_types[internal_index] = "ignored"
+                            skipped_blocks += 1
+                            LOGGER.debug("claude_request id=%s phase=stream_skip_block internal_index=%s type=%s", request_id, internal_index, block_type)
+                            continue
+                        if block_type not in {"text", "tool_use"}:
+                            block_types[internal_index] = "ignored"
+                            skipped_blocks += 1
+                            LOGGER.debug("claude_request id=%s phase=stream_skip_block internal_index=%s type=%s", request_id, internal_index, block_type)
+                            continue
+                        if active_external_index is not None:
+                            yield _sse("content_block_stop", {"type": "content_block_stop", "index": active_external_index})
+                            active_external_index = None
+                        external_index = block_index
+                        block_index += 1
+                        index_map[internal_index] = external_index
+                        block_types[internal_index] = block_type
+                        if block_type == "tool_use":
+                            content_block = {
+                                "type": "tool_use",
+                                "id": content_block.get("id", f"toolu_{uuid.uuid4().hex}"),
+                                "name": content_block.get("name", ""),
+                                "input": {},
+                            }
+                        else:
+                            content_block = {"type": "text", "text": str(content_block.get("text", ""))}
+                        yield _sse("content_block_start", {"type": "content_block_start", "index": external_index, "content_block": content_block})
+                        forwarded_blocks += 1
+                        active_external_index = external_index
                         saw_stream_content = True
 
                     elif event_type == "content_block_delta":
                         delta = event.get("delta", {})
                         if isinstance(delta, dict):
-                            yield _sse("content_block_delta", {"type": "content_block_delta", "index": event.get("index", block_index), "delta": delta})
-                            if delta.get("type") == "text_delta":
+                            internal_index = _stream_event_index(event, block_index)
+                            external_index = index_map.get(internal_index)
+                            block_type = block_types.get(internal_index)
+                            delta_type = delta.get("type")
+                            if external_index is None or block_type == "ignored":
+                                continue
+                            if block_type == "text" and delta_type != "text_delta":
+                                continue
+                            if block_type == "tool_use" and delta_type != "input_json_delta":
+                                continue
+                            yield _sse("content_block_delta", {"type": "content_block_delta", "index": external_index, "delta": delta})
+                            if delta_type == "input_json_delta":
+                                input_json_delta_chunks += 1
+                            if delta_type == "text_delta":
+                                text_delta_chunks += 1
                                 text_delta = str(delta.get("text", ""))
                                 total_output += len(text_delta)
                                 if text_delta and not first_output_logged:
@@ -707,11 +762,13 @@ async def _stream_messages(
                             saw_stream_content = True
 
                     elif event_type == "content_block_stop":
-                        if block_open:
-                            yield _sse("content_block_stop", {"type": "content_block_stop", "index": event.get("index", block_index)})
-                            block_open = False
-                            block_index += 1
-                        saw_stream_content = True
+                        internal_index = _stream_event_index(event, block_index)
+                        external_index = index_map.get(internal_index)
+                        if external_index is not None:
+                            yield _sse("content_block_stop", {"type": "content_block_stop", "index": external_index})
+                            if active_external_index == external_index:
+                                active_external_index = None
+                            saw_stream_content = True
 
                     elif event_type == "message_delta":
                         delta = event.get("delta", {})
@@ -730,31 +787,39 @@ async def _stream_messages(
                                 text = block.get("text", "")
                                 if not text:
                                     continue
-                                if block_open:
-                                    yield _sse("content_block_stop", {"type": "content_block_stop", "index": block_index})
-                                    block_index += 1
-                                yield _sse("content_block_start", {"type": "content_block_start", "index": block_index, "content_block": {"type": "text", "text": ""}})
-                                block_open = True
-                                yield _sse("content_block_delta", {"type": "content_block_delta", "index": block_index, "delta": {"type": "text_delta", "text": text}})
+                                if active_external_index is not None:
+                                    yield _sse("content_block_stop", {"type": "content_block_stop", "index": active_external_index})
+                                    active_external_index = None
+                                external_index = block_index
+                                block_index += 1
+                                yield _sse("content_block_start", {"type": "content_block_start", "index": external_index, "content_block": {"type": "text", "text": ""}})
+                                forwarded_blocks += 1
+                                active_external_index = external_index
+                                yield _sse("content_block_delta", {"type": "content_block_delta", "index": external_index, "delta": {"type": "text_delta", "text": text}})
+                                text_delta_chunks += 1
                                 if not first_output_logged:
                                     first_output_logged = True
                                     LOGGER.info("claude_request id=%s phase=first_output elapsed_ms=%s", request_id, elapsed_ms(stream_start_ms))
                                 total_output += len(text)
 
                             elif btype == "tool_use":
-                                if block_open:
-                                    yield _sse("content_block_stop", {"type": "content_block_stop", "index": block_index})
-                                    block_index += 1
+                                if active_external_index is not None:
+                                    yield _sse("content_block_stop", {"type": "content_block_stop", "index": active_external_index})
+                                    active_external_index = None
+                                external_index = block_index
+                                block_index += 1
                                 tool_block = {
                                     "type": "tool_use",
                                     "id": block.get("id", f"toolu_{uuid.uuid4().hex}"),
                                     "name": block.get("name", ""),
                                     "input": {},
                                 }
-                                yield _sse("content_block_start", {"type": "content_block_start", "index": block_index, "content_block": tool_block})
-                                block_open = True
+                                yield _sse("content_block_start", {"type": "content_block_start", "index": external_index, "content_block": tool_block})
+                                forwarded_blocks += 1
+                                active_external_index = external_index
                                 input_json = json.dumps(block.get("input", {}), ensure_ascii=False)
-                                yield _sse("content_block_delta", {"type": "content_block_delta", "index": block_index, "delta": {"type": "input_json_delta", "partial_json": input_json}})
+                                yield _sse("content_block_delta", {"type": "content_block_delta", "index": external_index, "delta": {"type": "input_json_delta", "partial_json": input_json}})
+                                input_json_delta_chunks += 1
                                 stop_reason = "tool_use"
 
                     elif event_type == "result":
@@ -784,8 +849,8 @@ async def _stream_messages(
                 if process.poll() is None:
                     process.kill()
 
-            if block_open:
-                yield _sse("content_block_stop", {"type": "content_block_stop", "index": block_index})
+            if active_external_index is not None:
+                yield _sse("content_block_stop", {"type": "content_block_stop", "index": active_external_index})
             elif block_index == 0:
                 yield _sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
                 yield _sse("content_block_stop", {"type": "content_block_stop", "index": 0})
@@ -797,7 +862,16 @@ async def _stream_messages(
                 "usage": {"output_tokens": out_tokens},
             })
             yield "event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"
-            LOGGER.info("claude_request id=%s phase=request_done mode=stream elapsed_ms=%s stop_reason=%s", request_id, elapsed_ms(request_start_ms), stop_reason)
+            LOGGER.info(
+                "claude_request id=%s phase=request_done mode=stream elapsed_ms=%s stop_reason=%s forwarded_blocks=%s skipped_blocks=%s text_delta_chunks=%s input_json_delta_chunks=%s",
+                request_id,
+                elapsed_ms(request_start_ms),
+                stop_reason,
+                forwarded_blocks,
+                skipped_blocks,
+                text_delta_chunks,
+                input_json_delta_chunks,
+            )
 
     return StreamingResponse(iterator(), media_type="text/event-stream")
 

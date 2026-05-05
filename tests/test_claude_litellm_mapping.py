@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import importlib.util
+import io
+import json
 from pathlib import Path
 
 from proxy_stack.config import ProxyConfig
@@ -46,6 +49,59 @@ def test_claude_command_allows_web_tools():
 def test_claude_stream_command_includes_partial_messages():
     command = app.claude_command("", "sonnet", "stream-json", verbose=True)
     assert "--include-partial-messages" in command
+
+
+def test_streaming_skips_thinking_and_remaps_tool_index(monkeypatch):
+    events = [
+        {"type": "stream_event", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}},
+        {"type": "stream_event", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "plan"}}},
+        {"type": "stream_event", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig"}}},
+        {"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}},
+        {"type": "stream_event", "event": {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "WebSearch", "input": {}}}},
+        {"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"query\":\"x\"}"}}},
+        {"type": "stream_event", "event": {"type": "content_block_stop", "index": 1}},
+        {"type": "stream_event", "event": {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}},
+    ]
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = io.StringIO("".join(json.dumps(event) + "\n" for event in events))
+            self.stderr = io.StringIO("")
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(app, "run_claude_streaming", lambda *args, **kwargs: FakeProcess())
+
+    async def collect_stream():
+        response = await app._stream_messages(
+            {"messages": [{"role": "user", "content": "search"}], "stream": True},
+            "sonnet",
+            "claude-code-sonnet",
+            None,
+            None,
+            "test-stream",
+            app.now_ms(),
+        )
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk)
+        return "".join(chunks)
+
+    body = asyncio.run(collect_stream())
+    assert '"thinking"' not in body
+    assert '"signature_delta"' not in body
+    assert '"type": "tool_use"' in body
+    assert '"index": 0, "content_block": {"type": "tool_use"' in body
+    assert '"index": 0, "delta": {"type": "input_json_delta"' in body
+    assert '"stop_reason": "tool_use"' in body
 
 
 def test_api_config_prompt_preserves_anthropic_controls():
