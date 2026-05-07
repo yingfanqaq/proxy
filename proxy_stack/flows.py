@@ -175,6 +175,11 @@ def source_details(config: ProxyConfig, flow: dict[str, Any]) -> dict[str, str]:
     if source.get("kind") == "external":
         fmt = source.get("format", "openai")
         env_key = f"PE_{slug(flow.get('id', 'flow'))}_API_KEY"
+        adapter = str(source.get("adapter") or "").strip().lower()
+        if adapter in {"claude-code-api-to-anthropic", "claude-api-to-anthropic", "claude-code-to-anthropic"} and source.get("local_port"):
+            local_port = int(source.get("local_port"))
+            local_key = f"PE_{slug(flow.get('id', 'flow'))}_LOCAL_API_KEY"
+            return {"api_base": f"http://{config.host}:{local_port}", "api_key_ref": f"os.environ/{local_key}", "format": fmt, "env_key": local_key, "env_value": source.get("local_api_key", "")}
         return {"api_base": source.get("base_url", ""), "api_key_ref": f"os.environ/{env_key}", "format": fmt, "env_key": env_key, "env_value": source.get("api_key", "")}
     provider = source.get("provider", "codex")
     api_base, key_name, fmt = local_source_base(config, provider)

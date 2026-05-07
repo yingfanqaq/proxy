@@ -323,6 +323,8 @@ def test_litellm_config_uses_explicit_claude_code_api_adapter(tmp_path, monkeypa
             "adapter": "claude-code-api-to-anthropic",
             "base_url": "https://example.com/api/claudecode",
             "api_key": "test-key",
+            "local_port": 39124,
+            "local_api_key": "local-key",
         },
         "middle": {"kind": "litellm"},
         "outputs": [{"format": "anthropic", "port": 4000, "api_key": "litellm-local-test-key"}],
@@ -332,6 +334,8 @@ def test_litellm_config_uses_explicit_claude_code_api_adapter(tmp_path, monkeypa
     text = generate_litellm_config_for_port(cfg, 4000).read_text(encoding="utf-8")
     assert "model_name: claude-code-sonnet-high" in text
     assert "model: anthropic/claude-sonnet-4-6" in text
+    assert "api_base: http://127.0.0.1:39124" in text
+    assert "api_key: os.environ/PE_EXTERNAL_CLAUDE_API_LOCAL_API_KEY" in text
     assert "reasoning_effort: high" in text
 
 

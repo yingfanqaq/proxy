@@ -59,6 +59,7 @@ def litellm_port_from_name(name: str, config: ProxyConfig) -> int:
 def service_names(config: ProxyConfig | None = None) -> tuple[str, ...]:
     cfg = (config or load_config()).normalized()
     source_names = [name for name in SOURCE_SERVICES if name in local_providers_used(cfg)]
+    source_names.extend(claude_code_api_service_name(flow) for flow in claude_code_api_adapter_flows(cfg))
     litellm_names = [litellm_service_name(port) for port in output_ports(cfg)]
     return tuple(source_names + litellm_names)
 
@@ -68,12 +69,37 @@ def log_path(name: str) -> Path:
         if name in ("litellm", "litellm_4000"):
             return log_dir() / "litellm-two-proxy.log"
         return log_dir() / f"{name}.log"
+    if name.startswith("claude_code_api_"):
+        return log_dir() / f"{name}.log"
     suffix = {
         "codex": "codex-chat-proxy.log",
         "gemini": "gemini-genai-proxy.log",
         "claude": "claude-code-proxy.log",
     }[name]
     return log_dir() / suffix
+
+
+def claude_code_api_adapter_flows(config: ProxyConfig) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for flow in config.flows:
+        source = flow.get("source", {}) if isinstance(flow, dict) else {}
+        adapter = str(source.get("adapter") or "").strip().lower()
+        if source.get("kind") != "external" or adapter not in {"claude-code-api-to-anthropic", "claude-api-to-anthropic", "claude-code-to-anthropic"}:
+            continue
+        if source.get("local_port"):
+            rows.append(flow)
+    return rows
+
+
+def claude_code_api_service_name(flow: dict[str, object]) -> str:
+    return f"claude_code_api_{flow.get('id')}"
+
+
+def claude_code_api_flow_from_name(config: ProxyConfig, name: str) -> dict[str, object] | None:
+    for flow in claude_code_api_adapter_flows(config):
+        if claude_code_api_service_name(flow) == name:
+            return flow
+    return None
 
 
 def generate_litellm_config(config: ProxyConfig) -> Path:
@@ -141,6 +167,22 @@ def service_spec(name: str, config: ProxyConfig | None = None) -> ServiceSpec:
         )
         command = frozen or [cfg.python_bin, "app.py"]
         return ServiceSpec(name, cfg.claude_port, f"http://{cfg.host}:{cfg.claude_port}/health", log_path(name), pid_path(name), cwd, command, env)
+    adapter_flow = claude_code_api_flow_from_name(cfg, name)
+    if adapter_flow:
+        source = adapter_flow.get("source", {})
+        local_port = int(source.get("local_port"))
+        env.update(
+            {
+                "CLAUDE_CODE_API_LOCAL_KEY": str(source.get("local_api_key") or "claude-code-api-local-key"),
+                "CLAUDE_CODE_API_BASE_URL": str(source.get("base_url") or "").rstrip("/"),
+                "CLAUDE_CODE_API_KEY": str(source.get("api_key") or ""),
+                "HOST": cfg.host,
+                "PORT": str(local_port),
+                "PYTHON_BIN": cfg.python_bin,
+            }
+        )
+        command = frozen or [cfg.python_bin, "-m", "proxy_stack.claude_code_api_adapter"]
+        return ServiceSpec(name, local_port, f"http://{cfg.host}:{local_port}/health", log_path(name), pid_path(name), root, command, env)
     if name.startswith("litellm"):
         port = litellm_port_from_name(name, cfg)
         config_path = generate_litellm_config_for_port(cfg, port)

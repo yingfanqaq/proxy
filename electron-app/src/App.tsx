@@ -256,13 +256,20 @@ function descriptorFromNode(node: Node): SourceDescriptor {
 
 function serviceNameForInput(node: Node): string | null {
   const desc = descriptorFromNode(node);
+  if (desc.adapter && node.data?.localPort) return `claude_code_api_${node.data.flowId || node.id}`;
   return desc.subtype === 'proxy' && desc.provider in LOCAL_PROVIDER_PORTS ? desc.provider : null;
 }
 
 function serviceNameForData(data: any): string | null {
+  if (data?.adapter && data?.localPort && data?.flowId) return `claude_code_api_${data.flowId}`;
   if (data?.subtype !== 'proxy') return null;
   const provider = inferLocalProvider(data);
   return provider in LOCAL_PROVIDER_PORTS ? provider : null;
+}
+
+function localEndpointForApiSource(node: Node): string | undefined {
+  const port = Number(node.data?.localPort);
+  return Number.isInteger(port) && port > 0 ? `http://127.0.0.1:${port}` : undefined;
 }
 
 function outputFormatFromNode(node: Node): string {
@@ -530,7 +537,7 @@ function graphIssues(allNodes: Node[], allEdges: Edge[]): string[] {
     }
     const serviceName = serviceNameForInput(input);
     if (serviceName) {
-      const port = Number(input.data?.port);
+      const port = Number(input.data?.localPort || input.data?.port);
       if (!Number.isInteger(port) || port < 1 || port > 65535) {
         issues.push(`Input [${input.data?.label || input.id}] has an invalid proxy port.`);
       } else {
@@ -603,11 +610,14 @@ function flowsToScheme(flows: any[], serviceStatus: Record<string, any>, config:
       const source = flow.source || {};
       const srcPos = flow.layout?.source || { x: 60, y: 90 + nodeId * 140 };
       const srcId = `node_${nodeId++}`;
+      const adapterServiceName = source.local_port ? `claude_code_api_${flow.id}` : '';
       const sourcePort = desc.subtype === 'proxy'
         ? configuredLocalPort(config, desc.provider, serviceStatus[desc.provider]?.port)
-        : undefined;
+        : source.local_port;
       const healthy = desc.subtype === 'proxy'
         ? Boolean(serviceStatus[desc.provider]?.healthy) && Number(serviceStatus[desc.provider]?.port) === Number(sourcePort)
+        : desc.adapter && source.local_port
+        ? Boolean(serviceStatus[adapterServiceName]?.healthy)
         : false;
       const protocol = desc.subtype === 'proxy'
         ? (PROVIDER_PROTOCOLS[desc.provider] || 'Custom')
@@ -626,6 +636,8 @@ function flowsToScheme(flows: any[], serviceStatus: Record<string, any>, config:
           port: sourcePort,
           baseUrl: source.base_url || source.baseUrl || desc.baseUrl,
           apiKey: source.api_key || source.apiKey || '',
+          localPort: source.local_port || source.localPort || '',
+          localApiKey: source.local_api_key || source.localApiKey || '',
           status: healthy ? 'online' : 'offline',
           flowId: flow.id,
           provider: desc.provider,
@@ -708,6 +720,8 @@ function schemeToFlows(nodes: Node[], edges: Edge[], originalFlows: any[]): any[
             adapter: desc.adapter,
             base_url: src.data.baseUrl || '',
             api_key: src.data.apiKey || '',
+            local_port: src.data.localPort || '',
+            local_api_key: src.data.localApiKey || '',
           };
 
       flows.push({
@@ -748,7 +762,7 @@ function mergeConfigPorts(config: Record<string, any>, allNodes: Node[]): Record
 }
 
 function healthyForNode(serviceInfo: any, node: Node): boolean {
-  const expectedPort = Number(node.data?.port);
+  const expectedPort = Number(node.data?.localPort || node.data?.port);
   const actualPort = Number(serviceInfo?.port);
   return Boolean(serviceInfo?.healthy) && (!expectedPort || actualPort === expectedPort);
 }
@@ -1252,8 +1266,13 @@ const App = () => {
 
     const serviceName = nodeData.type === 'input' && nodeData.subtype === 'proxy' ? nodeData.provider : null;
     const serviceInfo = serviceName ? serviceStatus[serviceName] : null;
+    const nextNodeId = getNextNodeId();
+    const flowId = nodeData.type === 'input' && nodeData.subtype === 'api' && nodeData.adapter
+      ? `${nodeData.provider}_${nextNodeId}`
+      : undefined;
     const newData = {
       ...nodeData,
+      flowId: flowId || nodeData.flowId,
       status: serviceInfo?.healthy && Number(serviceInfo?.port) === Number(configuredLocalPort(config, nodeData.provider, serviceInfo?.port)) ? 'online' : 'offline',
       port: nodeData.type === 'input' && nodeData.subtype === 'proxy'
         ? configuredLocalPort(config, nodeData.provider, serviceInfo?.port) || nodeData.port || 39121
@@ -1261,7 +1280,7 @@ const App = () => {
     };
 
     pushUndoSnapshot();
-    setNodes(nds => nds.concat({ id: getNextNodeId(), type: nodeData.type, position, data: newData }));
+    setNodes(nds => nds.concat({ id: nextNodeId, type: nodeData.type, position, data: newData }));
     addLog(`Deployed ${nodeData.type} node "${nodeData.label}" at (${Math.round(position.x)}, ${Math.round(position.y)})`, 'info');
   }, [reactFlowInstance, setNodes, addLog, serviceStatus, config, pushUndoSnapshot]);
 
@@ -1272,6 +1291,19 @@ const App = () => {
     addLog(`Testing connectivity for ${node?.data.label}${serviceName ? ` (service: ${serviceName})` : ''}...`, 'info');
     try {
       if (node && desc?.subtype === 'api') {
+        const localBaseUrl = localEndpointForApiSource(node);
+        const localApiKey = node.data.localApiKey || '';
+        if (localBaseUrl && localApiKey) {
+          const localResult = await api.testExternalApi({
+            provider: desc.provider,
+            protocol: node.data.protocol,
+            baseUrl: localBaseUrl,
+            apiKey: localApiKey,
+          });
+          setNodes(nds => nds.map(n => n.id === nodeId ? { ...n, data: { ...n.data, status: localResult.ok ? 'online' : 'offline' } } : n));
+          addLog(`${node.data.label} local adapter ${localResult.ok ? 'ONLINE' : 'OFFLINE'} — ${localResult.detail || 'local adapter checked'}`, localResult.ok ? 'success' : 'error');
+          if (!localResult.ok) return;
+        }
         const result = await api.testExternalApi({
           provider: desc.provider,
           protocol: node.data.protocol,

@@ -54,10 +54,28 @@ def run_litellm() -> None:
     )
 
 
+def run_claude_code_api(name: str) -> None:
+    from .manager import claude_code_api_flow_from_name
+
+    cfg = load_config()
+    flow = claude_code_api_flow_from_name(cfg, name)
+    if not flow:
+        raise SystemExit(f"Unknown Claude Code API adapter service: {name}")
+    source = flow.get("source", {})
+    os.environ["CLAUDE_CODE_API_LOCAL_KEY"] = str(source.get("local_api_key") or "claude-code-api-local-key")
+    os.environ["CLAUDE_CODE_API_BASE_URL"] = str(source.get("base_url") or "").rstrip("/")
+    os.environ["CLAUDE_CODE_API_KEY"] = str(source.get("api_key") or "")
+    os.environ["HOST"] = cfg.host
+    os.environ["PORT"] = str(int(source.get("local_port")))
+    from .claude_code_api_adapter import main as run_adapter
+
+    run_adapter()
+
+
 def main(argv: list[str] | None = None) -> None:
     args = list(argv or sys.argv[1:])
     if not args:
-        raise SystemExit("Usage: --service <codex|gemini|claude|litellm>")
+        raise SystemExit("Usage: --service <codex|gemini|claude|claude_code_api_*|litellm>")
     service = args[0]
     if service == "codex":
         run_codex()
@@ -67,5 +85,7 @@ def main(argv: list[str] | None = None) -> None:
         run_claude()
     elif service == "litellm" or service.startswith("litellm_"):
         run_litellm()
+    elif service.startswith("claude_code_api_"):
+        run_claude_code_api(service)
     else:
         raise SystemExit(f"Unknown service: {service}")

@@ -166,3 +166,29 @@ def test_external_claude_api_accepts_messages_when_models_missing():
     assert result["attempts"][0]["ok"] is False
     assert result["attempts"][1]["label"].startswith("messages:")
     assert result["attempts"][1]["ok"] is True
+
+
+def test_claude_code_api_adapter_service_is_included_for_local_port():
+    cfg = ProxyConfig(flows=[{
+        "id": "external_claude_api",
+        "enabled": True,
+        "source": {
+            "kind": "external",
+            "format": "anthropic",
+            "adapter": "claude-code-api-to-anthropic",
+            "base_url": "https://example.com/api/claudecode",
+            "api_key": "remote-key",
+            "local_port": 39124,
+            "local_api_key": "local-key",
+        },
+        "middle": {"kind": "litellm"},
+        "outputs": [{"format": "anthropic", "port": 4000, "api_key": "litellm-local-test-key"}],
+        "models": [{"name": "sonnet", "upstream": "sonnet"}],
+    }]).normalized()
+
+    assert "claude_code_api_external_claude_api" in manager.service_names(cfg)
+    spec = manager.service_spec("claude_code_api_external_claude_api", cfg)
+    assert spec.port == 39124
+    assert spec.env["CLAUDE_CODE_API_BASE_URL"] == "https://example.com/api/claudecode"
+    assert spec.env["CLAUDE_CODE_API_KEY"] == "remote-key"
+    assert spec.env["CLAUDE_CODE_API_LOCAL_KEY"] == "local-key"

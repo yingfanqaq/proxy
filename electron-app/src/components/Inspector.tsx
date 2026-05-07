@@ -81,6 +81,8 @@ export const Inspector = ({
 
   const currentPort = Number(data.port) || 0;
   const portConflict = type === 'input' && data.subtype === 'proxy' && currentPort > 0 && conflictingProxyPorts.has(currentPort);
+  const localPortValue = Number(data.localPort) || 0;
+  const localPortConflict = type === 'input' && data.subtype === 'api' && data.adapter && localPortValue > 0 && conflictingProxyPorts.has(localPortValue);
 
   const portInput = (label: string, accent?: boolean) => (
     <div>
@@ -146,6 +148,8 @@ export const Inspector = ({
     ? `http://127.0.0.1:${data.port || '???'}`
     : data.subtype === 'proxy'
     ? `http://127.0.0.1:${data.port || '???'}`
+    : data.adapter && data.localPort
+    ? `http://127.0.0.1:${data.localPort}`
     : (data.baseUrl || 'http://127.0.0.1:4000');
 
   const PROXY_KEYS: Record<string, string> = {
@@ -155,6 +159,8 @@ export const Inspector = ({
   };
   const curlKey = type === 'output'
     ? (data.apiKey || 'litellm-local-test-key')
+    : (data.adapter && data.localApiKey)
+    ? data.localApiKey
     : (data.apiKey || PROXY_KEYS[provider] || 'YOUR_API_KEY');
 
   function curlCommands(): { label: string; command: string }[] {
@@ -296,13 +302,13 @@ export const Inspector = ({
                 {data.subtype === 'api' ? (
                   <div className="space-y-3">
                     <div>
-                      <label className="block text-[10px] font-bold text-[var(--text-secondary)] mb-1 uppercase tracking-tighter">Base URL</label>
+                      <label className="block text-[10px] font-bold text-[var(--text-secondary)] mb-1 uppercase tracking-tighter">Upstream Base URL</label>
                       <input type="text" value={data.baseUrl || ''} onChange={(e) => onUpdateNode(id, { ...data, baseUrl: e.target.value })}
                         placeholder="https://api.openai.com/v1"
                         className="w-full bg-[var(--bg-main)] border border-[var(--border-main)] rounded-lg px-3 py-2 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)] transition-all shadow-sm" />
                     </div>
                     <div>
-                      <label className="block text-[10px] font-bold text-[var(--text-secondary)] mb-1 uppercase tracking-tighter">API Key</label>
+                      <label className="block text-[10px] font-bold text-[var(--text-secondary)] mb-1 uppercase tracking-tighter">Upstream API Key</label>
                       <div className="relative">
                         <ShieldCheck size={12} className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--text-secondary)]" />
                         <input type="password" value={data.apiKey || ''} onChange={(e) => onUpdateNode(id, { ...data, apiKey: e.target.value })}
@@ -310,6 +316,31 @@ export const Inspector = ({
                           className="w-full bg-[var(--bg-main)] border border-[var(--border-main)] rounded-lg px-3 py-2 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)] pr-8 transition-all shadow-sm" />
                       </div>
                     </div>
+                    {data.adapter && (
+                      <>
+                        <div>
+                          <label className="block text-[10px] font-bold text-[var(--text-secondary)] mb-1 uppercase tracking-tighter">Local Adapter Port</label>
+                          <input
+                            type="number"
+                            min="1"
+                            max="65535"
+                            value={data.localPort || ''}
+                            onChange={(e) => onUpdateNode(id, { ...data, localPort: e.target.value ? parseInt(e.target.value) : '' })}
+                            className={`w-full bg-[var(--bg-main)] border ${localPortConflict ? 'border-red-500 focus:border-red-500' : 'border-[var(--border-main)] focus:border-[var(--accent)]'} rounded-lg px-3 py-2 text-xs text-[var(--text-primary)] focus:outline-none transition-all shadow-sm`}
+                          />
+                          {localPortConflict && <p className="text-[9px] text-red-400 mt-1">This local adapter port is already used by another local proxy.</p>}
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-bold text-[var(--text-secondary)] mb-1 uppercase tracking-tighter">Local Adapter API Key</label>
+                          <div className="relative">
+                            <ShieldCheck size={12} className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--text-secondary)]" />
+                            <input type="text" value={data.localApiKey || ''} onChange={(e) => onUpdateNode(id, { ...data, localApiKey: e.target.value })}
+                              placeholder="claude-code-api-local-key"
+                              className="w-full bg-[var(--bg-main)] border border-[var(--border-main)] rounded-lg px-3 py-2 text-[11px] text-[var(--text-primary)] font-mono focus:outline-none focus:border-[var(--accent)] pr-8 transition-all shadow-sm" />
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </div>
                 ) : (
                   <div className="space-y-3">
