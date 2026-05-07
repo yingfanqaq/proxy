@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.error import HTTPError, URLError
+import json
+import urllib.request
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +20,124 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _normalize_api_base(base_url: Any) -> str:
+    return str(base_url or "").strip().rstrip("/")
+
+
+def _join_api_url(base_url: str, path: str) -> str:
+    return f"{base_url}/{path.lstrip('/')}"
+
+
+def _api_headers(api_key: str, provider: str, json_body: bool = False) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    if json_body:
+        headers["Content-Type"] = "application/json"
+    if not api_key:
+        return headers
+    if provider == "anthropic":
+        headers["x-api-key"] = api_key
+        headers["anthropic-version"] = "2023-06-01"
+        headers["Authorization"] = f"Bearer {api_key}"
+    elif provider == "gemini":
+        headers["x-goog-api-key"] = api_key
+        headers["Authorization"] = f"Bearer {api_key}"
+    else:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _request_json(url: str, headers: dict[str, str], body: dict[str, Any] | None = None, timeout: int = 12) -> tuple[int, Any]:
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST" if body is not None else "GET")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+        try:
+            parsed: Any = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            parsed = raw
+        return resp.status, parsed
+
+
+def _error_detail(exc: Exception) -> str:
+    if isinstance(exc, HTTPError):
+        try:
+            body = exc.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            body = ""
+        return f"HTTP {exc.code}{': ' + body if body else ''}"
+    if isinstance(exc, URLError):
+        return str(exc.reason)
+    return str(exc)
+
+
+def test_external_api_source(data: dict[str, Any]) -> dict[str, Any]:
+    provider = str(data.get("provider") or data.get("format") or "openai").lower()
+    if provider == "claude-api":
+        provider = "anthropic"
+    protocol = str(data.get("protocol") or "").lower()
+    if "anthropic" in protocol or "claude" in protocol:
+        provider = "anthropic"
+    elif "gemini" in protocol:
+        provider = "gemini"
+    base_url = _normalize_api_base(data.get("baseUrl") or data.get("base_url"))
+    api_key = str(data.get("apiKey") or data.get("api_key") or "")
+    if not base_url:
+        return {"ok": False, "detail": "Base URL is required."}
+    attempts: list[dict[str, Any]] = []
+
+    def attempt(label: str, path: str, body: dict[str, Any] | None = None) -> tuple[bool, Any]:
+        url = _join_api_url(base_url, path)
+        try:
+            status_code, payload = _request_json(url, _api_headers(api_key, provider, body is not None), body)
+            attempts.append({"label": label, "url": url, "ok": 200 <= status_code < 300, "status": status_code})
+            return 200 <= status_code < 300, payload
+        except Exception as exc:
+            attempts.append({"label": label, "url": url, "ok": False, "detail": _error_detail(exc)})
+            return False, None
+
+    if provider == "gemini":
+        ok, payload = attempt("list_models", "/v1beta/models")
+        return {"ok": ok, "detail": "Gemini model list is reachable." if ok else "Gemini model list failed.", "models": [item.get("name", "").split("/")[-1] for item in (payload or {}).get("models", []) if isinstance(item, dict)], "attempts": attempts}
+
+    if provider == "anthropic":
+        ok, payload = attempt("list_models", "/v1/models")
+        models = [item.get("id") for item in (payload or {}).get("data", []) if isinstance(item, dict) and item.get("id")] if isinstance(payload, dict) else []
+        if ok:
+            return {"ok": True, "detail": "Anthropic model list is reachable.", "models": models, "attempts": attempts}
+        configured_model = str(data.get("model") or "").strip()
+        candidate_models = [
+            configured_model,
+            "claude-sonnet-4-6",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-haiku-4-5",
+            "sonnet",
+            "opus",
+            "haiku",
+            "claude-code-sonnet",
+            "claude-code-opus",
+            "claude-code-haiku",
+        ]
+        seen_models: set[str] = set()
+        for model in candidate_models:
+            if not model or model in seen_models:
+                continue
+            seen_models.add(model)
+            body = {"model": model, "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]}
+            ok, _payload = attempt(f"messages:{model}", "/v1/messages", body)
+            if ok:
+                return {"ok": True, "detail": f"Anthropic messages endpoint is reachable with model {model}.", "models": models or list(seen_models), "attempts": attempts}
+        return {"ok": False, "detail": "Anthropic model list and messages checks failed.", "models": models, "attempts": attempts}
+
+    ok, payload = attempt("list_models", "/v1/models")
+    models = [item.get("id") for item in (payload or {}).get("data", []) if isinstance(item, dict) and item.get("id")] if isinstance(payload, dict) else []
+    if ok:
+        return {"ok": True, "detail": "OpenAI-compatible model list is reachable.", "models": models, "attempts": attempts}
+    body = {"model": str(data.get("model") or "test"), "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}
+    ok, _payload = attempt("chat_completions", "/v1/chat/completions", body)
+    return {"ok": ok, "detail": "OpenAI-compatible chat endpoint is reachable." if ok else "OpenAI-compatible model list and chat checks failed.", "models": models, "attempts": attempts}
 
 
 @app.get("/api/status")
@@ -69,8 +190,6 @@ def put_config(data: dict[str, Any]) -> dict[str, Any]:
 
 @app.get("/api/proxy-models/{provider}")
 def get_proxy_models(provider: str) -> dict[str, Any]:
-    import urllib.request
-    import json
     cfg = load_config()
     ports = {"codex": cfg.codex_port, "gemini": cfg.gemini_port, "claude": cfg.claude_port}
     keys = {"codex": cfg.codex_proxy_api_key, "gemini": cfg.gemini_proxy_api_key, "claude": cfg.claude_proxy_api_key}
@@ -96,11 +215,13 @@ def get_proxy_models(provider: str) -> dict[str, Any]:
         return {"provider": provider, "models": [], "error": str(exc)}
 
 
+@app.post("/api/external-api/test")
+def test_external_api(data: dict[str, Any]) -> dict[str, Any]:
+    return test_external_api_source(data)
+
+
 @app.post("/api/flows/validate")
 def validate_flows() -> dict[str, Any]:
-    import json
-    import urllib.request
-
     from .flows import enabled_flows_for_port, output_api_key, output_ports
 
     cfg = load_config()

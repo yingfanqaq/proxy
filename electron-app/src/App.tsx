@@ -390,10 +390,14 @@ function defaultAliases(desc: SourceDescriptor, models: string[]): [string, stri
   }
   if (desc.provider === 'anthropic') {
     return [
-      ['claude-api', 'sonnet'],
-      ['sonnet', 'sonnet'],
-      ['opus', 'opus'],
-      ['haiku', 'haiku'],
+      ['claude-api', 'claude-sonnet-4-6'],
+      ['sonnet', 'claude-sonnet-4-6'],
+      ['opus', 'claude-opus-4-7'],
+      ['haiku', 'claude-haiku-4-5'],
+      ['claude-sonnet-4-6', 'claude-sonnet-4-6'],
+      ['claude-opus-4-7', 'claude-opus-4-7'],
+      ['claude-opus-4-6', 'claude-opus-4-6'],
+      ['claude-haiku-4-5', 'claude-haiku-4-5'],
     ];
   }
   return [];
@@ -425,9 +429,9 @@ async function mappingForInputs(
   const sources: Record<string, ModelSource> = {};
   for (const [alias, upstream] of Object.entries(baseMapping)) {
     const owner = baseSources[alias];
-    if (owner && !connectedSourceKeys.has(owner.sourceKey)) continue;
+    if (!owner || !connectedSourceKeys.has(owner.sourceKey)) continue;
     mapping[alias] = upstream;
-    if (owner) sources[alias] = owner;
+    sources[alias] = owner;
   }
   const fetched: Record<string, string[]> = {};
 
@@ -1215,8 +1219,27 @@ const App = () => {
   const testNodeAvailability = async (nodeId: string) => {
     const node = nodes.find(n => n.id === nodeId);
     const serviceName = node ? serviceNameForInput(node) : null;
+    const desc = node ? descriptorFromNode(node) : null;
     addLog(`Testing connectivity for ${node?.data.label}${serviceName ? ` (service: ${serviceName})` : ''}...`, 'info');
     try {
+      if (node && desc?.subtype === 'api') {
+        const result = await api.testExternalApi({
+          provider: desc.provider,
+          protocol: node.data.protocol,
+          baseUrl: node.data.baseUrl,
+          apiKey: node.data.apiKey,
+        });
+        setNodes(nds => nds.map(n => n.id === nodeId ? { ...n, data: { ...n.data, status: result.ok ? 'online' : 'offline' } } : n));
+        if (result.ok) {
+          const models = result.models?.length ? `, ${result.models.length} model(s)` : '';
+          addLog(`${node.data.label} is ONLINE — ${result.detail || 'external API reachable'}${models}`, 'success');
+        } else {
+          const lastAttempt = result.attempts?.slice(-1)[0];
+          addLog(`${node.data.label} is OFFLINE — ${result.detail || lastAttempt?.detail || 'external API check failed'}`, 'error');
+        }
+        return;
+      }
+
       const sts = await api.fetchStatus();
       setServiceStatus(sts);
       const svcInfo = serviceName ? sts[serviceName] : null;

@@ -240,3 +240,26 @@ def test_litellm_config_keeps_each_local_provider_isolated(tmp_path, monkeypatch
     assert "api_base: http://127.0.0.1:39122/v1beta" in text
     assert "model: anthropic/claude-code-opus-4-7-xhigh" in text
     assert "api_base: http://127.0.0.1:39123" in text
+
+
+def test_litellm_config_uses_full_model_names_for_external_claude_api(tmp_path, monkeypatch):
+    monkeypatch.setattr("proxy_stack.flows.runtime_dir", lambda: tmp_path)
+    cfg = ProxyConfig(flows=[{
+        "id": "external_claude_api",
+        "enabled": True,
+        "source": {
+            "kind": "external",
+            "format": "anthropic",
+            "base_url": "https://example.com/api/claudecode",
+            "api_key": "test-key",
+        },
+        "middle": {"kind": "litellm"},
+        "outputs": [{"format": "anthropic", "port": 4000, "api_key": "litellm-local-test-key"}],
+        "models": [{"name": "sonnet", "upstream": "claude-sonnet-4-6"}],
+    }]).normalized()
+
+    text = generate_litellm_config_for_port(cfg, 4000).read_text(encoding="utf-8")
+    assert "model_name: sonnet" in text
+    assert "model: anthropic/claude-sonnet-4-6" in text
+    assert "api_base: https://example.com/api/claudecode" in text
+    assert "api_key: os.environ/PE_EXTERNAL_CLAUDE_API_API_KEY" in text

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from proxy_stack import manager
+from proxy_stack import api_server, manager
 from proxy_stack.config import ProxyConfig
 from proxy_stack.flows import generate_litellm_config_for_port
 
@@ -120,3 +121,48 @@ def test_litellm_config_uses_custom_local_proxy_port(tmp_path, monkeypatch):
     text = generate_litellm_config_for_port(cfg, 4000).read_text(encoding="utf-8")
     assert "api_base: http://127.0.0.1:39125/v1" in text
     assert "api_base: http://127.0.0.1:39121/v1" not in text
+
+
+class ClaudeCompatHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(404)
+        self.end_headers()
+        self.wfile.write(b'{"error":"models not supported"}')
+
+    def do_POST(self):
+        if self.path == "/v1/messages" and self.headers.get("x-api-key") == "test-key":
+            length = int(self.headers.get("content-length", "0"))
+            self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"id": "msg_test", "content": [{"type": "text", "text": "ok"}]}).encode())
+            return
+        self.send_response(401)
+        self.end_headers()
+
+    def log_message(self, _format, *_args):
+        return
+
+
+def test_external_claude_api_accepts_messages_when_models_missing():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ClaudeCompatHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = api_server.test_external_api_source({
+            "provider": "anthropic",
+            "baseUrl": f"http://127.0.0.1:{port}",
+            "apiKey": "test-key",
+        })
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert result["ok"] is True
+    assert "messages endpoint" in result["detail"]
+    assert result["attempts"][0]["label"] == "list_models"
+    assert result["attempts"][0]["ok"] is False
+    assert result["attempts"][1]["label"].startswith("messages:")
+    assert result["attempts"][1]["ok"] is True

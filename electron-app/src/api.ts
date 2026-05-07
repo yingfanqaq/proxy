@@ -75,3 +75,13 @@ export async function fetchProxyModels(provider: string): Promise<string[]> {
   const data = await res.json();
   return data.models || [];
 }
+
+export async function testExternalApi(data: Record<string, any>): Promise<{ ok: boolean; detail?: string; models?: string[]; attempts?: any[] }> {
+  const res = await fetch(`${API_BASE}/api/external-api/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(`status ${res.status}`);
+  return res.json();
+}
