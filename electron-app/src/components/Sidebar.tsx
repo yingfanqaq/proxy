@@ -10,7 +10,7 @@ const nodeCategories = [
       { id: 'claude-proxy', label: 'Claude Proxy', type: 'input', subtype: 'proxy', provider: 'claude', protocol: 'Anthropic', port: 39123, icon: Cpu, className: 'Claude Proxy' },
       { id: 'gemini-proxy', label: 'Gemini Proxy', type: 'input', subtype: 'proxy', provider: 'gemini', protocol: 'Gemini', port: 39122, icon: Cpu, className: 'Gemini Proxy' },
       { id: 'openai-api', label: 'OpenAI API', type: 'input', subtype: 'api', provider: 'openai', protocol: 'OpenAI', baseUrl: 'https://api.openai.com/v1', icon: Globe, className: 'OpenAI API' },
-      { id: 'anthropic-api', label: 'Claude API', type: 'input', subtype: 'api', provider: 'anthropic', protocol: 'Claude API → Anthropic', adapter: 'claude-api-to-anthropic', baseUrl: 'https://api.anthropic.com', icon: Globe, className: 'Claude API' },
+      { id: 'anthropic-api', label: 'Claude Code API', type: 'input', subtype: 'api', provider: 'anthropic', protocol: 'Claude Code API → Anthropic', adapter: 'claude-code-api-to-anthropic', baseUrl: 'https://api.anthropic.com', icon: Globe, className: 'Claude Code API' },
       { id: 'gemini-api', label: 'Gemini API', type: 'input', subtype: 'api', provider: 'gemini-api', protocol: 'Gemini', baseUrl: 'https://generativelanguage.googleapis.com', icon: Globe, className: 'Gemini API' },
       { id: 'deepseek-api', label: 'DeepSeek API', type: 'input', subtype: 'api', provider: 'deepseek', protocol: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', icon: Globe, className: 'DeepSeek API' },
       { id: 'custom-api', label: 'Custom API', type: 'input', subtype: 'api', provider: 'custom', protocol: 'Custom', baseUrl: '', icon: Zap, className: 'Custom API' },

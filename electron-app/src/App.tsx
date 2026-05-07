@@ -93,7 +93,7 @@ const PROVIDER_PROTOCOLS: Record<string, string> = {
 
 const EXTERNAL_FORMAT_LABELS: Record<string, string> = {
   openai: 'OpenAI API',
-  anthropic: 'Claude API',
+  anthropic: 'Claude Code API',
   gemini: 'Gemini API',
   deepseek: 'DeepSeek API',
   custom: 'Custom API',
@@ -208,7 +208,7 @@ function inferApiProvider(data: any): string {
   const raw = String(data.provider || '').toLowerCase();
   const text = `${raw} ${data.className || ''} ${data.label || ''} ${data.protocol || ''}`.toLowerCase();
   if (raw === 'custom' || text.includes('custom api')) return 'custom';
-  if (raw === 'anthropic' || raw === 'claude-api' || text.includes('claude api') || text.includes('anthropic')) return 'anthropic';
+  if (raw === 'anthropic' || raw === 'claude-api' || text.includes('claude code api') || text.includes('claude api') || text.includes('anthropic')) return 'anthropic';
   if (raw === 'gemini' || raw === 'gemini-api' || text.includes('gemini')) return 'gemini';
   if (raw === 'deepseek' || text.includes('deepseek')) return 'deepseek';
   if (raw === 'openai' || text.includes('openai')) return 'openai';
@@ -223,7 +223,7 @@ function descriptorFromFlow(flow: any): SourceDescriptor {
     const label = EXTERNAL_FORMAT_LABELS[format] || `${format} API`;
     const prefix = EXTERNAL_PROVIDER_PREFIX[format] || slug(label);
     const key = format === 'custom' ? `api:custom:${baseUrl}` : `api:${format}`;
-    const adapter = source.adapter || (format === 'anthropic' ? 'claude-api-to-anthropic' : undefined);
+    const adapter = source.adapter || (format === 'anthropic' ? 'claude-code-api-to-anthropic' : undefined);
     return { key, label, prefix, provider: format, subtype: 'api', baseUrl, adapter };
   }
   const provider = source.provider || 'codex';
@@ -246,7 +246,7 @@ function descriptorFromNode(node: Node): SourceDescriptor {
     const label = data.className || data.label || EXTERNAL_FORMAT_LABELS[provider] || `${provider} API`;
     const prefix = isCustom ? 'custom-api' : (EXTERNAL_PROVIDER_PREFIX[provider] || slug(label));
     const key = isCustom ? `api:custom:${baseUrl}` : `api:${provider}`;
-    const adapter = data.adapter || (provider === 'anthropic' ? 'claude-api-to-anthropic' : undefined);
+    const adapter = data.adapter || (provider === 'anthropic' ? 'claude-code-api-to-anthropic' : undefined);
     return { key, label, prefix, provider, subtype, baseUrl, adapter };
   }
   const provider = inferLocalProvider(data);

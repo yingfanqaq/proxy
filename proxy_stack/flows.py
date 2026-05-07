@@ -282,7 +282,7 @@ def uses_claude_api_adapter(flow: dict[str, Any], source_format: str) -> bool:
         return False
     adapter = str(source.get("adapter") or "").strip().lower()
     if adapter:
-        return adapter in {"claude-api-to-anthropic", "claude-code-to-anthropic"}
+        return adapter in {"claude-api-to-anthropic", "claude-code-api-to-anthropic", "claude-code-to-anthropic"}
     return True
 
 

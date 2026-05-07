@@ -105,7 +105,7 @@ def test_external_api_source(data: dict[str, Any]) -> dict[str, Any]:
         ok, payload = attempt("list_models", "/v1/models")
         models = [item.get("id") for item in (payload or {}).get("data", []) if isinstance(item, dict) and item.get("id")] if isinstance(payload, dict) else []
         if ok:
-            return {"ok": True, "detail": "Anthropic model list is reachable; Claude API adapter will normalize aliases through Anthropic Messages.", "models": models, "attempts": attempts}
+            return {"ok": True, "detail": "Anthropic model list is reachable; Claude Code API adapter will normalize aliases through Anthropic Messages.", "models": models, "attempts": attempts}
         configured_model = str(data.get("model") or "").strip()
         candidate_models = [
             configured_model,
@@ -134,7 +134,7 @@ def test_external_api_source(data: dict[str, Any]) -> dict[str, Any]:
                 body["output_config"] = {"effort": effort}
             ok, _payload = attempt(f"messages:{model}", "/v1/messages", body)
             if ok:
-                return {"ok": True, "detail": f"Claude API adapter is reachable through Anthropic messages with model {model_name}.", "models": models or list(seen_models), "attempts": attempts}
+                return {"ok": True, "detail": f"Claude Code API adapter is reachable through Anthropic messages with model {model_name}.", "models": models or list(seen_models), "attempts": attempts}
         return {"ok": False, "detail": "Anthropic model list and messages checks failed.", "models": models, "attempts": attempts}
 
     ok, payload = attempt("list_models", "/v1/models")

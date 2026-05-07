@@ -312,7 +312,30 @@ def test_litellm_config_migrates_stale_external_claude_aliases(tmp_path, monkeyp
     assert "model: anthropic/claude-code-opus-4-7-xhigh" not in text
 
 
-def test_litellm_config_uses_explicit_claude_api_adapter(tmp_path, monkeypatch):
+def test_litellm_config_uses_explicit_claude_code_api_adapter(tmp_path, monkeypatch):
+    monkeypatch.setattr("proxy_stack.flows.runtime_dir", lambda: tmp_path)
+    cfg = ProxyConfig(flows=[{
+        "id": "external_claude_api",
+        "enabled": True,
+        "source": {
+            "kind": "external",
+            "format": "anthropic",
+            "adapter": "claude-code-api-to-anthropic",
+            "base_url": "https://example.com/api/claudecode",
+            "api_key": "test-key",
+        },
+        "middle": {"kind": "litellm"},
+        "outputs": [{"format": "anthropic", "port": 4000, "api_key": "litellm-local-test-key"}],
+        "models": [{"name": "claude-code-sonnet-high", "upstream": "claude-code-sonnet-high"}],
+    }]).normalized()
+
+    text = generate_litellm_config_for_port(cfg, 4000).read_text(encoding="utf-8")
+    assert "model_name: claude-code-sonnet-high" in text
+    assert "model: anthropic/claude-sonnet-4-6" in text
+    assert "reasoning_effort: high" in text
+
+
+def test_litellm_config_keeps_legacy_claude_api_adapter(tmp_path, monkeypatch):
     monkeypatch.setattr("proxy_stack.flows.runtime_dir", lambda: tmp_path)
     cfg = ProxyConfig(flows=[{
         "id": "external_claude_api",
@@ -326,10 +349,9 @@ def test_litellm_config_uses_explicit_claude_api_adapter(tmp_path, monkeypatch):
         },
         "middle": {"kind": "litellm"},
         "outputs": [{"format": "anthropic", "port": 4000, "api_key": "litellm-local-test-key"}],
-        "models": [{"name": "claude-code-sonnet-high", "upstream": "claude-code-sonnet-high"}],
+        "models": [{"name": "claude-code-opus-high", "upstream": "claude-code-opus-high"}],
     }]).normalized()
 
     text = generate_litellm_config_for_port(cfg, 4000).read_text(encoding="utf-8")
-    assert "model_name: claude-code-sonnet-high" in text
-    assert "model: anthropic/claude-sonnet-4-6" in text
+    assert "model: anthropic/claude-opus-4-7" in text
     assert "reasoning_effort: high" in text

@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { X, Settings, Database, Info, Activity, ShieldCheck, Server, Terminal, AlertTriangle, Copy } from 'lucide-react';
 
 const CLASS_OPTIONS = {
-  input: ['Codex Proxy', 'Claude Proxy', 'Gemini Proxy', 'OpenAI API', 'Claude API', 'Gemini API', 'DeepSeek API', 'Custom API'],
+  input: ['Codex Proxy', 'Claude Proxy', 'Gemini Proxy', 'OpenAI API', 'Claude Code API', 'Gemini API', 'DeepSeek API', 'Custom API'],
   transform: ['LiteLLM'],
   output: ['OpenAI Output', 'Anthropic Output', 'Gemini Output']
 };
