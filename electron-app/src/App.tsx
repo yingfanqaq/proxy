@@ -532,7 +532,9 @@ function graphIssues(allNodes: Node[], allEdges: Edge[]): string[] {
   const providersByPort = new Map<number, Set<string>>();
 
   for (const input of allNodes.filter(n => n.type === 'input')) {
-    if (!allEdges.some(e => e.source === input.id)) {
+    const desc = descriptorFromNode(input);
+    const canRunStandalone = desc.subtype === 'api' && Boolean(desc.adapter) && Boolean(input.data?.localPort);
+    if (!canRunStandalone && !allEdges.some(e => e.source === input.id)) {
       issues.push(`Input [${input.data?.label || input.id}] has no LiteLLM target.`);
     }
     const serviceName = serviceNameForInput(input);
@@ -576,15 +578,64 @@ function graphIssues(allNodes: Node[], allEdges: Edge[]): string[] {
   return [...new Set(issues)];
 }
 
+function sourceConfigFromInput(src: Node): any {
+  const desc = descriptorFromNode(src);
+  const isLocalProxy = desc.subtype === 'proxy' && desc.provider in LOCAL_PROVIDER_PORTS;
+  if (isLocalProxy) return { kind: 'local', provider: desc.provider };
+  return {
+    kind: 'external',
+    format: formatFromProtocol(src.data.protocol),
+    adapter: desc.adapter,
+    base_url: src.data.baseUrl || '',
+    api_key: src.data.apiKey || '',
+    local_port: src.data.localPort || '',
+    local_api_key: src.data.localApiKey || '',
+  };
+}
+
 function flowsToScheme(flows: any[], serviceStatus: Record<string, any>, config: Record<string, any> = {}): Scheme {
   const nodes: Node[] = [];
   const edges: Edge[] = [];
   let nodeId = 0;
   const groups = new Map<string, any[]>();
+  const standaloneFlows: any[] = [];
   for (const flow of flows) {
+    if ((flow.outputs || []).length === 0) {
+      standaloneFlows.push(flow);
+      continue;
+    }
     const middle = flow.layout?.middle || { x: 380, y: 90 + groups.size * 180 };
     const key = `${Math.round(Number(middle.x) || 0)}:${Math.round(Number(middle.y) || 0)}`;
     groups.set(key, [...(groups.get(key) || []), flow]);
+  }
+
+  for (const flow of standaloneFlows) {
+    const desc = descriptorFromFlow(flow);
+    const source = flow.source || {};
+    const srcPos = flow.layout?.source || { x: 60, y: 90 + nodeId * 140 };
+    const srcId = `node_${nodeId++}`;
+    const adapterServiceName = source.local_port ? `claude_code_api_${flow.id}` : '';
+    const healthy = desc.adapter && source.local_port ? Boolean(serviceStatus[adapterServiceName]?.healthy) : false;
+    nodes.push({
+      id: srcId,
+      type: 'input',
+      position: { x: srcPos.x, y: srcPos.y },
+      data: {
+        label: desc.label,
+        className: desc.label,
+        subtype: desc.subtype,
+        protocol: desc.provider === 'anthropic' ? 'Claude Code API → Anthropic' : desc.provider === 'gemini' ? 'Gemini' : 'OpenAI',
+        adapter: desc.adapter,
+        port: source.local_port || '',
+        baseUrl: source.base_url || source.baseUrl || desc.baseUrl,
+        apiKey: source.api_key || source.apiKey || '',
+        localPort: source.local_port || source.localPort || '',
+        localApiKey: source.local_api_key || source.localApiKey || '',
+        status: healthy ? 'online' : 'offline',
+        flowId: flow.id,
+        provider: desc.provider,
+      },
+    });
   }
 
   for (const groupFlows of groups.values()) {
@@ -711,18 +762,7 @@ function schemeToFlows(nodes: Node[], edges: Edge[], originalFlows: any[]): any[
       const allInputs = connectedInputNodes(mid, nodes, edges);
       const models = modelsForSource(mid, src, allInputs);
       const desc = descriptorFromNode(src);
-      const isLocalProxy = desc.subtype === 'proxy' && desc.provider in LOCAL_PROVIDER_PORTS;
-      const sourceConfig = isLocalProxy
-        ? { kind: 'local', provider: desc.provider }
-        : {
-            kind: 'external',
-            format: formatFromProtocol(src.data.protocol),
-            adapter: desc.adapter,
-            base_url: src.data.baseUrl || '',
-            api_key: src.data.apiKey || '',
-            local_port: src.data.localPort || '',
-            local_api_key: src.data.localApiKey || '',
-          };
+      const sourceConfig = sourceConfigFromInput(src);
 
       flows.push({
         id: flowId,
@@ -739,6 +779,24 @@ function schemeToFlows(nodes: Node[], edges: Edge[], originalFlows: any[]): any[
         },
       });
     }
+  }
+  for (const src of inputNodes.filter(node => !edges.some(edge => edge.source === node.id))) {
+    const desc = descriptorFromNode(src);
+    if (!(desc.subtype === 'api' && desc.adapter && src.data.localPort)) continue;
+    const flowId = src.data.flowId || `${desc.provider}_${src.id}_${Date.now()}`;
+    const original = flowMap.get(flowId);
+    flows.push({
+      id: flowId,
+      name: original?.name || `${desc.provider} local adapter`,
+      enabled: true,
+      source: sourceConfigFromInput(src),
+      middle: { kind: 'standalone' },
+      outputs: [],
+      models: original?.models || [],
+      layout: {
+        source: { x: Math.round(src.position.x), y: Math.round(src.position.y) },
+      },
+    });
   }
   return flows;
 }
