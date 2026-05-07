@@ -57,6 +57,12 @@ export const InputNode = memo(({ data, selected }: NodeProps) => {
             <span className="font-medium">Protocol:</span>
             <span className="text-blue-500 font-mono font-bold bg-blue-500/5 px-1.5 py-0.5 rounded border border-blue-500/10">{data.protocol || 'OpenAI'}</span>
           </div>
+          {data.adapter && (
+            <div className="flex justify-between items-center">
+              <span className="font-medium">Adapter:</span>
+              <span className="text-blue-500 font-mono font-bold bg-blue-500/5 px-1.5 py-0.5 rounded border border-blue-500/10">Anthropic</span>
+            </div>
+          )}
           {data.subtype === 'proxy' ? (
             <div className="flex justify-between items-center">
               <span className="font-medium">Port:</span>

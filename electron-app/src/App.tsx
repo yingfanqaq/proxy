@@ -114,6 +114,7 @@ type SourceDescriptor = {
   provider: string;
   subtype: 'proxy' | 'api';
   baseUrl?: string;
+  adapter?: string;
 };
 
 type ModelSource = {
@@ -222,7 +223,8 @@ function descriptorFromFlow(flow: any): SourceDescriptor {
     const label = EXTERNAL_FORMAT_LABELS[format] || `${format} API`;
     const prefix = EXTERNAL_PROVIDER_PREFIX[format] || slug(label);
     const key = format === 'custom' ? `api:custom:${baseUrl}` : `api:${format}`;
-    return { key, label, prefix, provider: format, subtype: 'api', baseUrl };
+    const adapter = source.adapter || (format === 'anthropic' ? 'claude-api-to-anthropic' : undefined);
+    return { key, label, prefix, provider: format, subtype: 'api', baseUrl, adapter };
   }
   const provider = source.provider || 'codex';
   return {
@@ -244,7 +246,8 @@ function descriptorFromNode(node: Node): SourceDescriptor {
     const label = data.className || data.label || EXTERNAL_FORMAT_LABELS[provider] || `${provider} API`;
     const prefix = isCustom ? 'custom-api' : (EXTERNAL_PROVIDER_PREFIX[provider] || slug(label));
     const key = isCustom ? `api:custom:${baseUrl}` : `api:${provider}`;
-    return { key, label, prefix, provider, subtype, baseUrl };
+    const adapter = data.adapter || (provider === 'anthropic' ? 'claude-api-to-anthropic' : undefined);
+    return { key, label, prefix, provider, subtype, baseUrl, adapter };
   }
   const provider = inferLocalProvider(data);
   const label = data.className || data.label || PROVIDER_LABELS[provider] || `${provider} Proxy`;
@@ -619,6 +622,7 @@ function flowsToScheme(flows: any[], serviceStatus: Record<string, any>, config:
           className: desc.label,
           subtype: desc.subtype,
           protocol,
+          adapter: desc.adapter,
           port: sourcePort,
           baseUrl: source.base_url || source.baseUrl || desc.baseUrl,
           apiKey: source.api_key || source.apiKey || '',
@@ -701,6 +705,7 @@ function schemeToFlows(nodes: Node[], edges: Edge[], originalFlows: any[]): any[
         : {
             kind: 'external',
             format: formatFromProtocol(src.data.protocol),
+            adapter: desc.adapter,
             base_url: src.data.baseUrl || '',
             api_key: src.data.apiKey || '',
           };

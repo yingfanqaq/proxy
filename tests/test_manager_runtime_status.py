@@ -161,7 +161,7 @@ def test_external_claude_api_accepts_messages_when_models_missing():
         server.server_close()
 
     assert result["ok"] is True
-    assert "messages endpoint" in result["detail"]
+    assert "Anthropic messages" in result["detail"]
     assert result["attempts"][0]["label"] == "list_models"
     assert result["attempts"][0]["ok"] is False
     assert result["attempts"][1]["label"].startswith("messages:")

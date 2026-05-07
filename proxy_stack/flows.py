@@ -276,6 +276,16 @@ def external_anthropic_upstream_and_effort(model: dict[str, Any]) -> tuple[str, 
     return normalized, model_reasoning_effort(model) or upstream_effort
 
 
+def uses_claude_api_adapter(flow: dict[str, Any], source_format: str) -> bool:
+    source = flow.get("source", {})
+    if source.get("kind") != "external" or source_format != "anthropic":
+        return False
+    adapter = str(source.get("adapter") or "").strip().lower()
+    if adapter:
+        return adapter in {"claude-api-to-anthropic", "claude-code-to-anthropic"}
+    return True
+
+
 def generate_litellm_config_for_port(config: ProxyConfig, port: int) -> Path:
     path = runtime_dir() / f"litellm-flow-{port}.generated.yaml"
     request_timeout = litellm_request_timeout()
@@ -283,7 +293,7 @@ def generate_litellm_config_for_port(config: ProxyConfig, port: int) -> Path:
     for flow in enabled_flows_for_port(config, port):
         details = source_details(config, flow)
         prefix = litellm_model_prefix(details["format"])
-        external_anthropic = flow.get("source", {}).get("kind") == "external" and details["format"] == "anthropic"
+        external_anthropic = uses_claude_api_adapter(flow, details["format"])
         for model in flow.get("models", []):
             model_name = model.get("name")
             upstream = model.get("upstream", model_name)
