@@ -263,3 +263,50 @@ def test_litellm_config_uses_full_model_names_for_external_claude_api(tmp_path, 
     assert "model: anthropic/claude-sonnet-4-6" in text
     assert "api_base: https://example.com/api/claudecode" in text
     assert "api_key: os.environ/PE_EXTERNAL_CLAUDE_API_API_KEY" in text
+
+
+def test_litellm_config_passes_reasoning_effort_for_external_claude_api(tmp_path, monkeypatch):
+    monkeypatch.setattr("proxy_stack.flows.runtime_dir", lambda: tmp_path)
+    cfg = ProxyConfig(flows=[{
+        "id": "external_claude_api",
+        "enabled": True,
+        "source": {
+            "kind": "external",
+            "format": "anthropic",
+            "base_url": "https://example.com/api/claudecode",
+            "api_key": "test-key",
+        },
+        "middle": {"kind": "litellm"},
+        "outputs": [{"format": "anthropic", "port": 4000, "api_key": "litellm-local-test-key"}],
+        "models": [{"name": "claude-code-opus-4-7-xhigh", "upstream": "claude-opus-4-7", "effort": "xhigh"}],
+    }]).normalized()
+
+    text = generate_litellm_config_for_port(cfg, 4000).read_text(encoding="utf-8")
+    assert "model_name: claude-code-opus-4-7-xhigh" in text
+    assert "model: anthropic/claude-opus-4-7" in text
+    assert "reasoning_effort: xhigh" in text
+
+
+def test_litellm_config_migrates_stale_external_claude_aliases(tmp_path, monkeypatch):
+    monkeypatch.setattr("proxy_stack.flows.runtime_dir", lambda: tmp_path)
+    cfg = ProxyConfig(flows=[{
+        "id": "external_claude_api",
+        "enabled": True,
+        "source": {
+            "kind": "external",
+            "format": "anthropic",
+            "base_url": "https://example.com/api/claudecode",
+            "api_key": "test-key",
+        },
+        "middle": {"kind": "litellm"},
+        "outputs": [{"format": "anthropic", "port": 4000, "api_key": "litellm-local-test-key"}],
+        "models": [{"name": "opus", "upstream": "opus"}, {"name": "claude-code-opus-4-7-xhigh", "upstream": "claude-code-opus-4-7-xhigh"}],
+    }]).normalized()
+
+    text = generate_litellm_config_for_port(cfg, 4000).read_text(encoding="utf-8")
+    assert "model_name: opus" in text
+    assert "model: anthropic/claude-opus-4-7" in text
+    assert "model_name: claude-code-opus-4-7-xhigh" in text
+    assert "reasoning_effort: xhigh" in text
+    assert "model: anthropic/opus" not in text
+    assert "model: anthropic/claude-code-opus-4-7-xhigh" not in text

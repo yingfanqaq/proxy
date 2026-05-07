@@ -12,6 +12,28 @@ from .config import ProxyConfig, runtime_dir
 
 LOCAL_SOURCE_PROVIDERS = {"codex", "gemini", "claude"}
 SOURCE_FORMATS = {"codex": "openai", "gemini": "gemini", "claude": "anthropic"}
+REASONING_EFFORT_ALIASES = {
+    "minimal": "low",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max",
+}
+EXTERNAL_ANTHROPIC_MODEL_ALIASES = {
+    "claude-code": "claude-sonnet-4-6",
+    "claude-api": "claude-sonnet-4-6",
+    "claude-code-sonnet": "claude-sonnet-4-6",
+    "sonnet": "claude-sonnet-4-6",
+    "claude-code-opus": "claude-opus-4-7",
+    "opus": "claude-opus-4-7",
+    "claude-code-haiku": "claude-haiku-4-5",
+    "haiku": "claude-haiku-4-5",
+    "claude-code-sonnet-4-6": "claude-sonnet-4-6",
+    "claude-code-opus-4-7": "claude-opus-4-7",
+    "claude-code-opus-4-6": "claude-opus-4-6",
+    "claude-code-haiku-4-5": "claude-haiku-4-5",
+}
 
 
 def default_flows() -> list[dict[str, Any]]:
@@ -234,6 +256,26 @@ def litellm_request_timeout() -> int:
         return 900
 
 
+def model_reasoning_effort(model: dict[str, Any]) -> str | None:
+    raw = str(model.get("reasoning_effort") or model.get("effort") or "").strip().lower()
+    return REASONING_EFFORT_ALIASES.get(raw)
+
+
+def split_reasoning_effort(value: Any) -> tuple[str, str | None]:
+    text = str(value or "").strip()
+    for effort in REASONING_EFFORT_ALIASES:
+        suffix = f"-{effort}"
+        if text.endswith(suffix):
+            return text[: -len(suffix)], REASONING_EFFORT_ALIASES[effort]
+    return text, None
+
+
+def external_anthropic_upstream_and_effort(model: dict[str, Any]) -> tuple[str, str | None]:
+    upstream, upstream_effort = split_reasoning_effort(model.get("upstream", model.get("name")))
+    normalized = EXTERNAL_ANTHROPIC_MODEL_ALIASES.get(upstream, upstream)
+    return normalized, model_reasoning_effort(model) or upstream_effort
+
+
 def generate_litellm_config_for_port(config: ProxyConfig, port: int) -> Path:
     path = runtime_dir() / f"litellm-flow-{port}.generated.yaml"
     request_timeout = litellm_request_timeout()
@@ -241,9 +283,13 @@ def generate_litellm_config_for_port(config: ProxyConfig, port: int) -> Path:
     for flow in enabled_flows_for_port(config, port):
         details = source_details(config, flow)
         prefix = litellm_model_prefix(details["format"])
+        external_anthropic = flow.get("source", {}).get("kind") == "external" and details["format"] == "anthropic"
         for model in flow.get("models", []):
             model_name = model.get("name")
             upstream = model.get("upstream", model_name)
+            reasoning_effort = model_reasoning_effort(model) if isinstance(model, dict) else None
+            if external_anthropic and isinstance(model, dict):
+                upstream, reasoning_effort = external_anthropic_upstream_and_effort(model)
             if not model_name or not upstream:
                 continue
             lines.extend(
@@ -257,6 +303,8 @@ def generate_litellm_config_for_port(config: ProxyConfig, port: int) -> Path:
                     f"      stream_timeout: {request_timeout}",
                 ]
             )
+            if reasoning_effort:
+                lines.append(f"      reasoning_effort: {reasoning_effort}")
             lines.append("")
     if len(lines) == 1:
         lines.extend(

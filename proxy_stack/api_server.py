@@ -110,8 +110,11 @@ def test_external_api_source(data: dict[str, Any]) -> dict[str, Any]:
         candidate_models = [
             configured_model,
             "claude-sonnet-4-6",
+            "claude-sonnet-4-6:high",
             "claude-opus-4-7",
+            "claude-opus-4-7:high",
             "claude-opus-4-6",
+            "claude-opus-4-6:max",
             "claude-haiku-4-5",
             "sonnet",
             "opus",
@@ -125,10 +128,13 @@ def test_external_api_source(data: dict[str, Any]) -> dict[str, Any]:
             if not model or model in seen_models:
                 continue
             seen_models.add(model)
-            body = {"model": model, "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]}
+            model_name, _, effort = model.partition(":")
+            body = {"model": model_name, "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]}
+            if effort:
+                body["output_config"] = {"effort": effort}
             ok, _payload = attempt(f"messages:{model}", "/v1/messages", body)
             if ok:
-                return {"ok": True, "detail": f"Anthropic messages endpoint is reachable with model {model}.", "models": models or list(seen_models), "attempts": attempts}
+                return {"ok": True, "detail": f"Anthropic messages endpoint is reachable with model {model_name}.", "models": models or list(seen_models), "attempts": attempts}
         return {"ok": False, "detail": "Anthropic model list and messages checks failed.", "models": models, "attempts": attempts}
 
     ok, payload = attempt("list_models", "/v1/models")

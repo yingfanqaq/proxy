@@ -135,7 +135,7 @@ export const Inspector = ({
   const outputModel = useMemo(() => {
     if (outputModels.length === 0) return 'MODEL_FROM_LIST';
     const preferred = protocol.includes('anthropic')
-      ? ['claude-code', 'claude-code-sonnet', 'sonnet', 'claude-code-opus', 'opus', 'claude-code-haiku', 'haiku', 'claude-code-opus-4-7', 'claude-code-opus-4-7-high', 'claude-code-opus-4-7-xhigh', 'claude-code-opus-4-6', 'claude-code-opus-4-6-high', 'claude-code-sonnet-4-6', 'claude-code-sonnet-4-6-high']
+      ? ['claude-code', 'claude-code-sonnet', 'sonnet', 'claude-code-sonnet-4-6', 'claude-code-sonnet-4-6-high', 'claude-code-opus', 'opus', 'claude-code-opus-4-7', 'claude-code-opus-4-7-high', 'claude-code-opus-4-7-xhigh', 'claude-code-opus-4-6', 'claude-code-opus-4-6-max', 'claude-code-haiku', 'haiku']
       : protocol.includes('gemini')
       ? ['gemini', 'gemini-3.1-pro-preview', 'gemini-2.5-pro', 'gemini-2.5-flash']
       : ['codex', 'gpt-5.5', 'gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2'];
@@ -202,7 +202,7 @@ export const Inspector = ({
         },
         {
           label: 'Test Messages (Anthropic)',
-          command: `curl ${curlBase}/v1/messages \\\n  -H "Content-Type: application/json" \\\n  -H "x-api-key: ${curlKey}" \\\n  -H "anthropic-version: 2023-06-01" \\\n  -d '{"model": "claude-code", "max_tokens": 10, "messages": [{"role": "user", "content": "hi"}]}'`,
+          command: `curl ${curlBase}/v1/messages \\\n  -H "Content-Type: application/json" \\\n  -H "x-api-key: ${curlKey}" \\\n  -H "anthropic-version: 2023-06-01" \\\n  -d '{"model": "claude-sonnet-4-6", "max_tokens": 10, "output_config": {"effort": "high"}, "messages": [{"role": "user", "content": "hi"}]}'`,
         },
       ];
     }

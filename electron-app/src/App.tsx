@@ -82,7 +82,7 @@ const LOCAL_PROVIDER_CONFIG_KEYS: Record<string, string> = {
 const FALLBACK_PROXY_MODELS: Record<string, string[]> = {
   codex: ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5.2'],
   gemini: ['gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
-  claude: ['claude-code', 'claude-code-sonnet', 'claude-code-opus', 'claude-code-haiku', 'claude-code-opus-4-7', 'claude-code-opus-4-7-high', 'claude-code-opus-4-7-xhigh', 'claude-code-opus-4-6', 'claude-code-opus-4-6-high', 'claude-code-sonnet-4-6', 'claude-code-sonnet-4-6-high', 'sonnet', 'opus', 'haiku'],
+  claude: ['claude-code', 'claude-code-sonnet', 'claude-code-opus', 'claude-code-haiku', 'claude-code-sonnet-4-6', 'claude-code-sonnet-4-6-high', 'claude-code-opus-4-7', 'claude-code-opus-4-7-high', 'claude-code-opus-4-7-xhigh', 'claude-code-opus-4-6', 'claude-code-opus-4-6-max', 'claude-code-haiku-4-5', 'sonnet', 'opus', 'haiku'],
 };
 
 const PROVIDER_PROTOCOLS: Record<string, string> = {
@@ -120,7 +120,45 @@ type ModelSource = {
   sourceKey: string;
   sourceLabel: string;
   upstream: string;
+  effort?: string;
 };
+
+type ModelAlias = {
+  alias: string;
+  upstream: string;
+  effort?: string;
+};
+
+const CLAUDE_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const CLAUDE_CODE_UPSTREAM_MODELS = new Set(['claude-sonnet-4-6', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-haiku-4-5']);
+const CLAUDE_CODE_MODEL_ALIASES: ModelAlias[] = [
+  { alias: 'claude-code', upstream: 'claude-sonnet-4-6' },
+  { alias: 'claude-code-sonnet', upstream: 'claude-sonnet-4-6' },
+  { alias: 'claude-code-opus', upstream: 'claude-opus-4-7' },
+  { alias: 'claude-code-haiku', upstream: 'claude-haiku-4-5' },
+  { alias: 'sonnet', upstream: 'claude-sonnet-4-6' },
+  { alias: 'opus', upstream: 'claude-opus-4-7' },
+  { alias: 'haiku', upstream: 'claude-haiku-4-5' },
+  { alias: 'claude-code-sonnet-4-6', upstream: 'claude-sonnet-4-6' },
+  { alias: 'claude-code-opus-4-7', upstream: 'claude-opus-4-7' },
+  { alias: 'claude-code-opus-4-6', upstream: 'claude-opus-4-6' },
+  { alias: 'claude-code-haiku-4-5', upstream: 'claude-haiku-4-5' },
+  { alias: 'claude-sonnet-4-6', upstream: 'claude-sonnet-4-6' },
+  { alias: 'claude-opus-4-7', upstream: 'claude-opus-4-7' },
+  { alias: 'claude-opus-4-6', upstream: 'claude-opus-4-6' },
+  { alias: 'claude-haiku-4-5', upstream: 'claude-haiku-4-5' },
+  ...['low', 'medium', 'high'].flatMap(effort => [
+    { alias: `claude-code-sonnet-${effort}`, upstream: 'claude-sonnet-4-6', effort },
+    { alias: `claude-code-sonnet-4-6-${effort}`, upstream: 'claude-sonnet-4-6', effort },
+  ]),
+  ...['low', 'medium', 'high', 'xhigh'].flatMap(effort => [
+    { alias: `claude-code-opus-${effort}`, upstream: 'claude-opus-4-7', effort },
+    { alias: `claude-code-opus-4-7-${effort}`, upstream: 'claude-opus-4-7', effort },
+  ]),
+  ...['low', 'medium', 'high', 'max'].flatMap(effort => [
+    { alias: `claude-code-opus-4-6-${effort}`, upstream: 'claude-opus-4-6', effort },
+  ]),
+];
 
 function slug(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'source';
@@ -245,6 +283,7 @@ function addModelAlias(
   desc: SourceDescriptor,
   alias: string,
   upstream: string,
+  effort?: string,
 ): string {
   let candidate = alias;
   const existing = sources[candidate];
@@ -253,7 +292,7 @@ function addModelAlias(
     && !existing
     && String(mapping[candidate] || '').trim() === upstream
   ) {
-    sources[candidate] = { sourceKey: desc.key, sourceLabel: desc.label, upstream };
+    sources[candidate] = { sourceKey: desc.key, sourceLabel: desc.label, upstream, effort };
     return candidate;
   }
   if (
@@ -271,8 +310,24 @@ function addModelAlias(
     unique = `${candidate}-${suffix++}`;
   }
   mapping[unique] = upstream;
-  sources[unique] = { sourceKey: desc.key, sourceLabel: desc.label, upstream };
+  sources[unique] = { sourceKey: desc.key, sourceLabel: desc.label, upstream, effort };
   return unique;
+}
+
+function inferClaudeCodeAlias(alias: string): ModelAlias | null {
+  const exact = CLAUDE_CODE_MODEL_ALIASES.find(item => item.alias === alias);
+  if (exact) return exact;
+  for (const effort of CLAUDE_EFFORT_LEVELS) {
+    const suffix = `-${effort}`;
+    if (!alias.endsWith(suffix)) continue;
+    const base = alias.slice(0, -suffix.length);
+    const baseAlias = CLAUDE_CODE_MODEL_ALIASES.find(item => item.alias === base && !item.effort);
+    if (baseAlias && baseAlias.upstream !== 'claude-haiku-4-5') {
+      return { alias, upstream: baseAlias.upstream, effort };
+    }
+  }
+  if (CLAUDE_CODE_UPSTREAM_MODELS.has(alias)) return { alias, upstream: alias };
+  return null;
 }
 
 function mergeFlowModels(flows: any[]): { mapping: Record<string, string>; sources: Record<string, ModelSource> } {
@@ -283,8 +338,9 @@ function mergeFlowModels(flows: any[]): { mapping: Record<string, string>; sourc
     for (const model of flow.models || []) {
       const alias = String(model.name || '').trim();
       const upstream = String(model.upstream || model.name || '').trim();
+      const effort = String(model.effort || model.reasoning_effort || '').trim() || undefined;
       if (!alias || !upstream) continue;
-      addModelAlias(mapping, sources, desc, alias, upstream);
+      addModelAlias(mapping, sources, desc, alias, upstream, effort);
     }
   }
   return { mapping, sources };
@@ -308,7 +364,12 @@ function modelsForSource(mid: Node, source: Node, connectedInputs: Node[]): any[
     if (!name || !upstream) continue;
     const owner = sourceMeta[name];
     if (owner?.sourceKey === desc.key) {
-      models.push({ name, upstream });
+      models.push({ name, upstream, ...(owner.effort ? { effort: owner.effort } : {}) });
+      continue;
+    }
+    const inferred = desc.provider === 'anthropic' ? inferClaudeCodeAlias(name) : null;
+    if (!owner && inferred) {
+      models.push({ name, upstream: inferred.upstream, ...(inferred.effort ? { effort: inferred.effort } : {}) });
       continue;
     }
     if (!owner && name.startsWith(`${desc.prefix}-`)) {
@@ -355,49 +416,27 @@ function duplicateInputIssue(source: Node, transform: Node, allNodes: Node[], al
   return null;
 }
 
-function defaultAliases(desc: SourceDescriptor, models: string[]): [string, string][] {
+function defaultAliases(desc: SourceDescriptor, models: string[]): ModelAlias[] {
   if (desc.provider === 'codex' && models.length > 0) {
-    return [['codex', models[0]]];
+    return [{ alias: 'codex', upstream: models[0] }];
   }
   if (desc.provider === 'gemini' && models.length > 0) {
-    return [['gemini', models[0]]];
+    return [{ alias: 'gemini', upstream: models[0] }];
   }
   if (desc.provider === 'gemini' && desc.subtype === 'api') {
     return [
-      ['gemini', 'gemini-2.5-pro'],
-      ['gemini-2.5-pro', 'gemini-2.5-pro'],
-      ['gemini-2.5-flash', 'gemini-2.5-flash'],
+      { alias: 'gemini', upstream: 'gemini-2.5-pro' },
+      { alias: 'gemini-2.5-pro', upstream: 'gemini-2.5-pro' },
+      { alias: 'gemini-2.5-flash', upstream: 'gemini-2.5-flash' },
     ];
   }
   if (desc.provider === 'claude') {
-    const aliases: [string, string][] = [
-      ['claude-code', 'claude-code'],
-      ['claude-code-sonnet', 'sonnet'],
-      ['claude-code-opus', 'opus'],
-      ['claude-code-haiku', 'haiku'],
-      ['claude-code-opus-4-7', 'claude-code-opus-4-7'],
-      ['claude-code-opus-4-7-high', 'claude-code-opus-4-7-high'],
-      ['claude-code-opus-4-7-xhigh', 'claude-code-opus-4-7-xhigh'],
-      ['claude-code-opus-4-6', 'claude-code-opus-4-6'],
-      ['claude-code-opus-4-6-high', 'claude-code-opus-4-6-high'],
-      ['claude-code-sonnet-4-6', 'claude-code-sonnet-4-6'],
-      ['claude-code-sonnet-4-6-high', 'claude-code-sonnet-4-6-high'],
-    ];
-    if (models.includes('sonnet')) aliases.push(['sonnet', 'sonnet']);
-    if (models.includes('opus')) aliases.push(['opus', 'opus']);
-    if (models.includes('haiku')) aliases.push(['haiku', 'haiku']);
-    return aliases;
+    return CLAUDE_CODE_MODEL_ALIASES;
   }
   if (desc.provider === 'anthropic') {
     return [
-      ['claude-api', 'claude-sonnet-4-6'],
-      ['sonnet', 'claude-sonnet-4-6'],
-      ['opus', 'claude-opus-4-7'],
-      ['haiku', 'claude-haiku-4-5'],
-      ['claude-sonnet-4-6', 'claude-sonnet-4-6'],
-      ['claude-opus-4-7', 'claude-opus-4-7'],
-      ['claude-opus-4-6', 'claude-opus-4-6'],
-      ['claude-haiku-4-5', 'claude-haiku-4-5'],
+      { alias: 'claude-api', upstream: 'claude-sonnet-4-6' },
+      ...CLAUDE_CODE_MODEL_ALIASES,
     ];
   }
   return [];
@@ -431,7 +470,7 @@ async function mappingForInputs(
     const owner = baseSources[alias];
     if (!owner || !connectedSourceKeys.has(owner.sourceKey)) continue;
     mapping[alias] = upstream;
-    sources[alias] = owner;
+    sources[alias] = { ...owner, upstream: String(upstream || owner.upstream || '') };
   }
   const fetched: Record<string, string[]> = {};
 
@@ -441,11 +480,16 @@ async function mappingForInputs(
     const fetchedModels = serviceName ? await api.fetchProxyModels(serviceName).catch(() => []) : [];
     const models = fetchedModels.length > 0 ? fetchedModels : (serviceName ? (FALLBACK_PROXY_MODELS[serviceName] || []) : []);
     if (serviceName) fetched[desc.label] = fetchedModels;
-    for (const [alias, upstream] of defaultAliases(desc, models)) {
-      addModelAlias(mapping, sources, desc, alias, upstream);
+    for (const item of defaultAliases(desc, models)) {
+      addModelAlias(mapping, sources, desc, item.alias, item.upstream, item.effort);
     }
     for (const model of models) {
-      addModelAlias(mapping, sources, desc, model, model);
+      const inferred = desc.provider === 'anthropic' ? inferClaudeCodeAlias(model) : null;
+      if (inferred) {
+        addModelAlias(mapping, sources, desc, inferred.alias, inferred.upstream, inferred.effort);
+      } else {
+        addModelAlias(mapping, sources, desc, model, model);
+      }
     }
   }
 
