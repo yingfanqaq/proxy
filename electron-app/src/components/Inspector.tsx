@@ -329,6 +329,9 @@ export const Inspector = ({
                             className={`w-full bg-[var(--bg-main)] border ${localPortConflict ? 'border-red-500 focus:border-red-500' : 'border-[var(--border-main)] focus:border-[var(--accent)]'} rounded-lg px-3 py-2 text-xs text-[var(--text-primary)] focus:outline-none transition-all shadow-sm`}
                           />
                           {localPortConflict && <p className="text-[9px] text-red-400 mt-1">This local adapter port is already used by another local proxy.</p>}
+                          {data.status !== 'online' && (
+                            <p className="text-[9px] text-[var(--text-secondary)] mt-1 italic">Save and restart to start this local adapter.</p>
+                          )}
                         </div>
                         <div>
                           <label className="block text-[10px] font-bold text-[var(--text-secondary)] mb-1 uppercase tracking-tighter">Local Adapter API Key</label>

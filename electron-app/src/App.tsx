@@ -1293,7 +1293,8 @@ const App = () => {
       if (node && desc?.subtype === 'api') {
         const localBaseUrl = localEndpointForApiSource(node);
         const localApiKey = node.data.localApiKey || '';
-        if (localBaseUrl && localApiKey) {
+        const adapterServiceInfo = serviceName ? serviceStatus[serviceName] : null;
+        if (localBaseUrl && localApiKey && adapterServiceInfo?.healthy) {
           const localResult = await api.testExternalApi({
             provider: desc.provider,
             protocol: node.data.protocol,
@@ -1303,6 +1304,8 @@ const App = () => {
           setNodes(nds => nds.map(n => n.id === nodeId ? { ...n, data: { ...n.data, status: localResult.ok ? 'online' : 'offline' } } : n));
           addLog(`${node.data.label} local adapter ${localResult.ok ? 'ONLINE' : 'OFFLINE'} — ${localResult.detail || 'local adapter checked'}`, localResult.ok ? 'success' : 'error');
           if (!localResult.ok) return;
+        } else if (localBaseUrl && localApiKey) {
+          addLog(`${node.data.label} local adapter is not running yet — save and restart the flow to expose ${localBaseUrl}. Testing upstream directly now.`, 'warn');
         }
         const result = await api.testExternalApi({
           provider: desc.provider,
@@ -1313,7 +1316,7 @@ const App = () => {
         setNodes(nds => nds.map(n => n.id === nodeId ? { ...n, data: { ...n.data, status: result.ok ? 'online' : 'offline' } } : n));
         if (result.ok) {
           const models = result.models?.length ? `, ${result.models.length} model(s)` : '';
-          addLog(`${node.data.label} is ONLINE — ${result.detail || 'external API reachable'}${models}`, 'success');
+          addLog(`${node.data.label} upstream is ONLINE — ${result.detail || 'external API reachable'}${models}`, 'success');
         } else {
           const lastAttempt = result.attempts?.slice(-1)[0];
           addLog(`${node.data.label} is OFFLINE — ${result.detail || lastAttempt?.detail || 'external API check failed'}`, 'error');
