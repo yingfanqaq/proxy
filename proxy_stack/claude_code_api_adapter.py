@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -160,6 +161,11 @@ def proxy_response(url: str, method: str, headers: dict[str, str], body: bytes |
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
+    return {"status": "ok", "service": APP_NAME}
+
+
+@app.get("/info")
+async def info() -> dict[str, Any]:
     return {
         "status": "ok",
         "service": APP_NAME,
@@ -193,7 +199,14 @@ async def proxy_anthropic(path: str, request: Request, authorization: str | None
             payload = normalize_model_request(payload)
             stream = bool(payload.get("stream"))
             raw_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    return proxy_response(upstream_url(f"/v1/{path}"), method, upstream_headers(request, bool(raw_body)), raw_body or None, stream)
+    return await asyncio.to_thread(
+        proxy_response,
+        upstream_url(f"/v1/{path}"),
+        method,
+        upstream_headers(request, bool(raw_body)),
+        raw_body or None,
+        stream,
+    )
 
 
 def main() -> None:
