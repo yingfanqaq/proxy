@@ -137,7 +137,7 @@ export const Inspector = ({
   const outputModel = useMemo(() => {
     if (outputModels.length === 0) return 'MODEL_FROM_LIST';
     const preferred = protocol.includes('anthropic')
-      ? ['claude-code', 'claude-code-sonnet', 'sonnet', 'claude-code-sonnet-4-6', 'claude-code-sonnet-4-6-high', 'claude-code-opus', 'opus', 'claude-code-opus-4-7', 'claude-code-opus-4-7-high', 'claude-code-opus-4-7-xhigh', 'claude-code-opus-4-6', 'claude-code-opus-4-6-max', 'claude-code-haiku', 'haiku']
+      ? ['claude-code', 'claude-code-sonnet', 'claude-code-sonnet-max', 'sonnet', 'claude-code-sonnet-4-6', 'claude-code-sonnet-4-6-high', 'claude-code-sonnet-4-6-max', 'claude-code-opus', 'claude-code-opus-max', 'opus', 'claude-code-opus-4-7', 'claude-code-opus-4-7-high', 'claude-code-opus-4-7-xhigh', 'claude-code-opus-4-7-max', 'claude-code-opus-4-6', 'claude-code-opus-4-6-max', 'claude-code-haiku', 'haiku']
       : protocol.includes('gemini')
       ? ['gemini', 'gemini-3.1-pro-preview', 'gemini-2.5-pro', 'gemini-2.5-flash']
       : ['codex', 'gpt-5.5', 'gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2'];

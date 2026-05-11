@@ -9,6 +9,7 @@ from pathlib import Path
 
 from proxy_stack.config import ProxyConfig
 from proxy_stack.flows import generate_litellm_config_for_port
+from proxy_stack.claude_code_api_adapter import model_catalog, normalize_model_request
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_PATH = ROOT / "claude-code-proxy" / "app.py"
@@ -31,6 +32,20 @@ def test_payload_effort_overrides_alias_suffix():
 def test_accepts_litellm_reasoning_effort_alias():
     payload = {"model": "claude-code-opus", "reasoning_effort": "minimal"}
     assert app.resolve_model_request(payload["model"], payload) == ("opus", "low")
+
+
+def test_claude_code_api_adapter_catalog_includes_max_effort_aliases():
+    models = set(model_catalog())
+    assert "claude-code-sonnet-max" in models
+    assert "claude-code-sonnet-4-6-max" in models
+    assert "claude-code-opus-max" in models
+    assert "claude-code-opus-4-7-max" in models
+
+
+def test_claude_code_api_adapter_normalizes_max_effort_aliases():
+    payload = normalize_model_request({"model": "claude-code-sonnet-4-6-max", "max_tokens": 10})
+    assert payload["model"] == "claude-sonnet-4-6"
+    assert payload["output_config"]["effort"] == "max"
 
 
 def test_claude_command_allows_web_tools():

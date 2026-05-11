@@ -61,9 +61,9 @@ def model_catalog() -> list[str]:
     ]
     efforts: list[str] = []
     for model in ("claude-code-sonnet", "claude-code-sonnet-4-6"):
-        efforts.extend(f"{model}-{effort}" for effort in ("low", "medium", "high"))
+        efforts.extend(f"{model}-{effort}" for effort in ("low", "medium", "high", "max"))
     for model in ("claude-code-opus", "claude-code-opus-4-7"):
-        efforts.extend(f"{model}-{effort}" for effort in ("low", "medium", "high", "xhigh"))
+        efforts.extend(f"{model}-{effort}" for effort in EFFORT_LEVELS)
     efforts.extend(f"claude-code-opus-4-6-{effort}" for effort in ("low", "medium", "high", "max"))
     return list(dict.fromkeys([*base, *efforts]))
 

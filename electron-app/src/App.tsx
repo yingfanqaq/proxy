@@ -82,7 +82,7 @@ const LOCAL_PROVIDER_CONFIG_KEYS: Record<string, string> = {
 const FALLBACK_PROXY_MODELS: Record<string, string[]> = {
   codex: ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5.2'],
   gemini: ['gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
-  claude: ['claude-code', 'claude-code-sonnet', 'claude-code-opus', 'claude-code-haiku', 'claude-code-sonnet-4-6', 'claude-code-sonnet-4-6-high', 'claude-code-opus-4-7', 'claude-code-opus-4-7-high', 'claude-code-opus-4-7-xhigh', 'claude-code-opus-4-6', 'claude-code-opus-4-6-max', 'claude-code-haiku-4-5', 'sonnet', 'opus', 'haiku'],
+  claude: ['claude-code', 'claude-code-sonnet', 'claude-code-sonnet-max', 'claude-code-opus', 'claude-code-opus-max', 'claude-code-haiku', 'claude-code-sonnet-4-6', 'claude-code-sonnet-4-6-high', 'claude-code-sonnet-4-6-max', 'claude-code-opus-4-7', 'claude-code-opus-4-7-high', 'claude-code-opus-4-7-xhigh', 'claude-code-opus-4-7-max', 'claude-code-opus-4-6', 'claude-code-opus-4-6-max', 'claude-code-haiku-4-5', 'sonnet', 'opus', 'haiku'],
 };
 
 const PROVIDER_PROTOCOLS: Record<string, string> = {
@@ -148,11 +148,11 @@ const CLAUDE_CODE_MODEL_ALIASES: ModelAlias[] = [
   { alias: 'claude-opus-4-7', upstream: 'claude-opus-4-7' },
   { alias: 'claude-opus-4-6', upstream: 'claude-opus-4-6' },
   { alias: 'claude-haiku-4-5', upstream: 'claude-haiku-4-5' },
-  ...['low', 'medium', 'high'].flatMap(effort => [
+  ...['low', 'medium', 'high', 'max'].flatMap(effort => [
     { alias: `claude-code-sonnet-${effort}`, upstream: 'claude-sonnet-4-6', effort },
     { alias: `claude-code-sonnet-4-6-${effort}`, upstream: 'claude-sonnet-4-6', effort },
   ]),
-  ...['low', 'medium', 'high', 'xhigh'].flatMap(effort => [
+  ...CLAUDE_EFFORT_LEVELS.flatMap(effort => [
     { alias: `claude-code-opus-${effort}`, upstream: 'claude-opus-4-7', effort },
     { alias: `claude-code-opus-4-7-${effort}`, upstream: 'claude-opus-4-7', effort },
   ]),
