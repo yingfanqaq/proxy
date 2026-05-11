@@ -6,6 +6,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from proxy_stack import api_server, manager
+from proxy_stack import claude_code_api_adapter
 from proxy_stack.config import ProxyConfig
 from proxy_stack.flows import generate_litellm_config_for_port
 
@@ -192,3 +193,23 @@ def test_claude_code_api_adapter_service_is_included_for_local_port():
     assert spec.env["CLAUDE_CODE_API_BASE_URL"] == "https://example.com/api/claudecode"
     assert spec.env["CLAUDE_CODE_API_KEY"] == "remote-key"
     assert spec.env["CLAUDE_CODE_API_LOCAL_KEY"] == "local-key"
+
+
+def test_claude_code_api_adapter_returns_structured_upstream_url_errors(monkeypatch):
+    def fail_urlopen(_req, timeout=None):
+        raise claude_code_api_adapter.urllib.error.URLError("ssl eof")
+
+    monkeypatch.setattr(claude_code_api_adapter.urllib.request, "urlopen", fail_urlopen)
+    monkeypatch.setattr(claude_code_api_adapter, "UPSTREAM_RETRIES", 1)
+    response = claude_code_api_adapter.proxy_response(
+        "https://example.com/v1/messages",
+        "POST",
+        {"Content-Type": "application/json"},
+        b"{}",
+        False,
+        "test-error",
+    )
+    assert response.status_code == 502
+    body = json.loads(response.body.decode())
+    assert body["error"]["type"] == "upstream_connection_error"
+    assert "ssl eof" in body["error"]["detail"]

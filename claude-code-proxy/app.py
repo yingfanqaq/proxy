@@ -521,6 +521,11 @@ def estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def estimate_payload_tokens(payload: dict[str, Any]) -> int:
+    stats = payload_stats(payload)
+    return max(1, stats["text_chars"] // 4 + stats["images"] * 1200 + stats["messages"] * 4 + stats["tool_results"] * 8)
+
+
 def _stream_event_index(event: dict[str, Any], fallback: int) -> int:
     value = event.get("index", fallback)
     try:
@@ -568,6 +573,20 @@ async def list_models(
             for model in MODELS
         ],
     }
+
+@app.post("/v1/messages/count_tokens")
+async def count_message_tokens(
+    request: Request,
+    authorization: str | None = Header(None),
+    x_api_key: str | None = Header(None),
+) -> dict[str, int]:
+    require_auth(authorization, x_api_key)
+    request_id = uuid.uuid4().hex[:12]
+    payload = await request.json()
+    tokens = estimate_payload_tokens(payload if isinstance(payload, dict) else {})
+    model_raw = payload.get("model") if isinstance(payload, dict) else ""
+    LOGGER.info("claude_request id=%s phase=count_tokens model_raw=%s input_tokens=%s", request_id, model_raw or "", tokens)
+    return {"input_tokens": tokens}
 
 
 @app.post("/v1/messages", response_model=None)

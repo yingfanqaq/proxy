@@ -9,7 +9,7 @@ from pathlib import Path
 
 from proxy_stack.config import ProxyConfig
 from proxy_stack.flows import generate_litellm_config_for_port
-from proxy_stack.claude_code_api_adapter import model_catalog, normalize_model_request
+from proxy_stack.claude_code_api_adapter import estimate_input_tokens, model_catalog, normalize_model_request
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_PATH = ROOT / "claude-code-proxy" / "app.py"
@@ -46,6 +46,22 @@ def test_claude_code_api_adapter_normalizes_max_effort_aliases():
     payload = normalize_model_request({"model": "claude-code-sonnet-4-6-max", "max_tokens": 10})
     assert payload["model"] == "claude-sonnet-4-6"
     assert payload["output_config"]["effort"] == "max"
+
+
+def test_claude_code_api_adapter_normalizes_legacy_claude_desktop_aliases():
+    payload = normalize_model_request({"model": "claude-3-5-sonnet-latest", "max_tokens": 10})
+    assert payload["model"] == "claude-sonnet-4-6"
+
+
+def test_claude_code_api_adapter_estimates_count_tokens_locally():
+    tokens = estimate_input_tokens({"messages": [{"role": "user", "content": "hello world"}]})
+    assert tokens >= 1
+    assert estimate_input_tokens({"messages": [{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "data": "xx"}}]}]}) > tokens
+
+
+def test_claude_proxy_estimates_count_tokens_locally():
+    tokens = app.estimate_payload_tokens({"messages": [{"role": "user", "content": "hello world"}]})
+    assert tokens >= 1
 
 
 def test_claude_command_allows_web_tools():
