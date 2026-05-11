@@ -9,7 +9,7 @@ from pathlib import Path
 
 from proxy_stack.config import ProxyConfig
 from proxy_stack.flows import generate_litellm_config_for_port
-from proxy_stack.claude_code_api_adapter import estimate_input_tokens, model_catalog, normalize_model_request
+from proxy_stack.claude_code_api_adapter import estimate_input_tokens, is_title_generation_request, model_catalog, normalize_model_request, title_generation_body, title_generation_sse
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_PATH = ROOT / "claude-code-proxy" / "app.py"
@@ -51,6 +51,52 @@ def test_claude_code_api_adapter_normalizes_max_effort_aliases():
 def test_claude_code_api_adapter_normalizes_legacy_claude_desktop_aliases():
     payload = normalize_model_request({"model": "claude-3-5-sonnet-latest", "max_tokens": 10})
     assert payload["model"] == "claude-sonnet-4-6"
+
+
+def test_claude_code_api_adapter_falls_back_haiku_to_sonnet_for_title_gen():
+    payload = normalize_model_request({"model": "claude-code-haiku", "max_tokens": 10})
+    assert payload["model"] == "claude-sonnet-4-6"
+
+
+def title_generation_payload(description="修复 Claude Code 代理会话命名问题"):
+    return {
+        "model": "claude-code-haiku",
+        "max_tokens": 64,
+        "messages": [{
+            "role": "user",
+            "content": (
+                "You are coming up with a succinct title for an agent chat session based on the provided description.\n"
+                "You should wrap the title in <title> tags.\n\n"
+                "Here is the session description:\n"
+                f"<description>{description}</description>\n"
+                "Please generate a title for this session.\n"
+            ),
+        }],
+    }
+
+
+def test_claude_code_api_adapter_detects_title_generation_prompt():
+    assert is_title_generation_request(title_generation_payload())
+    assert not is_title_generation_request({"messages": [{"role": "user", "content": "hello"}]})
+
+
+def test_claude_code_api_adapter_generates_local_title_response():
+    body = title_generation_body(title_generation_payload(), "claude-code-haiku")
+    assert body["type"] == "message"
+    assert body["role"] == "assistant"
+    assert body["model"] == "claude-code-haiku"
+    assert body["content"][0]["text"].startswith("<title>")
+    assert body["content"][0]["text"].endswith("</title>")
+    assert "Claude Code" in body["content"][0]["text"]
+
+
+def test_claude_code_api_adapter_generates_title_sse():
+    body = title_generation_body(title_generation_payload("你好"), "claude-code-haiku")
+    stream = title_generation_sse(body)
+    assert "event: message_start" in stream
+    assert "event: content_block_delta" in stream
+    assert "<title>简单问候</title>" in stream
+    assert "event: message_stop" in stream
 
 
 def test_claude_code_api_adapter_estimates_count_tokens_locally():

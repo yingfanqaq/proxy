@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -25,6 +27,8 @@ UPSTREAM_API_KEY = os.environ.get("CLAUDE_CODE_API_KEY", "").strip()
 ANTHROPIC_VERSION = os.environ.get("ANTHROPIC_VERSION", "2023-06-01")
 REQUEST_TIMEOUT = int(os.environ.get("CLAUDE_CODE_API_TIMEOUT", "900"))
 UPSTREAM_RETRIES = max(0, int(os.environ.get("CLAUDE_CODE_API_RETRIES", "2")))
+HAIKU_FALLBACK_MODEL = os.environ.get("CLAUDE_CODE_API_HAIKU_FALLBACK_MODEL", "claude-sonnet-4-6").strip()
+LOCAL_TITLE_GENERATION = os.environ.get("CLAUDE_CODE_API_LOCAL_TITLE_GENERATION", "1").strip().lower() not in {"0", "false", "no"}
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 EFFORT_ALIASES = {"minimal": "low"}
 MODEL_ALIASES = {
@@ -119,6 +123,23 @@ def content_text_chars(content: Any) -> int:
     return len(str(content or ""))
 
 
+def content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                if item.get("type") == "text":
+                    parts.append(str(item.get("text", "")))
+                elif item.get("type") == "tool_result":
+                    parts.append(content_text(item.get("content")))
+        return "\n".join(part for part in parts if part)
+    return str(content or "")
+
+
 def estimate_input_tokens(payload: dict[str, Any]) -> int:
     text_chars = content_text_chars(payload.get("system"))
     images = 0
@@ -133,6 +154,108 @@ def estimate_input_tokens(payload: dict[str, Any]) -> int:
                 images += sum(1 for item in content if isinstance(item, dict) and item.get("type") == "image")
     message_overhead = len(messages) * 4 if isinstance(messages, list) else 0
     return max(1, text_chars // 4 + images * 1200 + message_overhead)
+
+
+def payload_text(payload: dict[str, Any]) -> str:
+    parts: list[str] = []
+    system_text = content_text(payload.get("system"))
+    if system_text:
+        parts.append(system_text)
+    messages = payload.get("messages", [])
+    if isinstance(messages, list):
+        for message in messages:
+            if isinstance(message, dict):
+                text = content_text(message.get("content"))
+                if text:
+                    parts.append(text)
+    return "\n".join(parts)
+
+
+def is_title_generation_request(payload: dict[str, Any]) -> bool:
+    text = payload_text(payload)
+    markers = (
+        "succinct title for an agent chat session",
+        "wrap the title in <title> tags",
+        "<description>",
+        "</description>",
+        "Please generate a title for this session.",
+    )
+    return LOCAL_TITLE_GENERATION and all(marker in text for marker in markers)
+
+
+def extract_title_description(payload: dict[str, Any]) -> str:
+    text = payload_text(payload)
+    match = re.search(r"<description>(.*?)</description>", text, re.IGNORECASE | re.DOTALL)
+    description = match.group(1) if match else text
+    description = html.unescape(description)
+    description = re.sub(r"<[^>]+>", " ", description)
+    description = re.sub(r"```.*?```", " ", description, flags=re.DOTALL)
+    return re.sub(r"\s+", " ", description).strip()
+
+
+def local_title_from_description(description: str) -> str:
+    text = description.strip()
+    if not text:
+        return "New chat"
+    text = re.sub(r"^(please|can you|could you|help me|let'?s)\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^(请你|请|帮我|麻烦|可以|你看|我想|我希望|接下来|关于)", "", text).strip()
+    first_sentence = re.split(r"[。！？!?；;\n\r]+", text, 1)[0].strip(" -:：,.，")
+    if not first_sentence:
+        first_sentence = text
+    if re.search(r"[\u4e00-\u9fff]", first_sentence):
+        if first_sentence in {"你好", "您好", "嗨", "哈喽"}:
+            return "简单问候"
+        tokens = re.findall(r"[\u4e00-\u9fff]+|[A-Za-z0-9][A-Za-z0-9_+#./-]*", first_sentence)
+        if tokens:
+            title = " ".join(tokens[:6])
+            return title[:30].strip() or "新会话"
+        return first_sentence[:22].strip() or "新会话"
+    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9_+#./-]*", first_sentence)
+    if not words:
+        return "New chat"
+    if len(words) == 1 and words[0].lower() in {"hi", "hello", "hey"}:
+        return "Quick greeting"
+    return " ".join(words[:6])
+
+
+def title_generation_body(payload: dict[str, Any], model: str) -> dict[str, Any]:
+    title = local_title_from_description(extract_title_description(payload))
+    text = f"<title>{html.escape(title, quote=False)}</title>"
+    return {
+        "id": f"msg_{uuid.uuid4().hex}",
+        "type": "message",
+        "role": "assistant",
+        "model": model or str(payload.get("model") or "claude-code-haiku"),
+        "content": [{"type": "text", "text": text}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": estimate_input_tokens(payload),
+            "output_tokens": max(1, len(text) // 4),
+        },
+    }
+
+
+def title_generation_sse(body: dict[str, Any]) -> str:
+    message = dict(body)
+    text = ""
+    if body.get("content") and isinstance(body["content"], list):
+        first = body["content"][0]
+        if isinstance(first, dict):
+            text = str(first.get("text", ""))
+    message["content"] = []
+    message["stop_reason"] = None
+    message["stop_sequence"] = None
+    message["usage"] = {"input_tokens": body.get("usage", {}).get("input_tokens", 1), "output_tokens": 0}
+    events = [
+        ("message_start", {"type": "message_start", "message": message}),
+        ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+        ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}),
+        ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+        ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": body.get("usage", {}).get("output_tokens", 1)}}),
+        ("message_stop", {"type": "message_stop"}),
+    ]
+    return "".join(f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n" for event, data in events)
 
 
 def require_auth(authorization: str | None, x_api_key: str | None) -> None:
@@ -165,7 +288,11 @@ def split_model_effort(model: Any) -> tuple[str, str | None]:
 def normalize_model_request(payload: dict[str, Any]) -> dict[str, Any]:
     updated = dict(payload)
     raw_model, suffix_effort = split_model_effort(updated.get("model"))
-    updated["model"] = MODEL_ALIASES.get(raw_model, raw_model)
+    normalized_model = MODEL_ALIASES.get(raw_model, raw_model)
+    if HAIKU_FALLBACK_MODEL and normalized_model == "claude-haiku-4-5":
+        LOGGER.info("adapter_request phase=model_fallback model_raw=%s model=%s fallback=%s", raw_model, normalized_model, HAIKU_FALLBACK_MODEL)
+        normalized_model = HAIKU_FALLBACK_MODEL
+    updated["model"] = normalized_model
     effort = normalize_effort(updated.get("reasoning_effort")) or suffix_effort
     output_config = updated.get("output_config")
     if effort and not (isinstance(output_config, dict) and output_config.get("effort")):
@@ -270,6 +397,8 @@ async def info() -> dict[str, Any]:
         "service": APP_NAME,
         "upstream_base_url": UPSTREAM_BASE_URL,
         "models": MODELS,
+        "haiku_fallback_model": HAIKU_FALLBACK_MODEL,
+        "local_title_generation": LOCAL_TITLE_GENERATION,
     }
 
 
@@ -313,6 +442,34 @@ async def proxy_anthropic(path: str, request: Request, authorization: str | None
             payload = normalize_model_request(payload)
             model = str(payload.get("model") or "")
             stream = bool(payload.get("stream"))
+            if is_title_generation_request(payload):
+                body = title_generation_body(payload, model_raw or model)
+                LOGGER.info(
+                    "adapter_request id=%s phase=request_start method=%s path=/v1/%s stream=%s model_raw=%s model=%s body_bytes=%s local_title_generation=true",
+                    request_id,
+                    method,
+                    path,
+                    stream,
+                    model_raw,
+                    model,
+                    len(raw_body or b""),
+                )
+                LOGGER.info(
+                    "adapter_request id=%s phase=local_title_generation model_raw=%s model=%s title_chars=%s",
+                    request_id,
+                    model_raw,
+                    model,
+                    len(body["content"][0]["text"]),
+                )
+                LOGGER.info(
+                    "adapter_request id=%s phase=request_done elapsed_ms=%s status=200 path=/v1/%s",
+                    request_id,
+                    elapsed_ms(start_ms),
+                    path,
+                )
+                if stream:
+                    return Response(content=title_generation_sse(body), status_code=200, media_type="text/event-stream")
+                return JSONResponse(body)
             raw_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     LOGGER.info(
         "adapter_request id=%s phase=request_start method=%s path=/v1/%s stream=%s model_raw=%s model=%s body_bytes=%s",
