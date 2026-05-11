@@ -7,9 +7,11 @@ import io
 import json
 from pathlib import Path
 
+from fastapi.responses import JSONResponse, Response
+
 from proxy_stack.config import ProxyConfig
 from proxy_stack.flows import generate_litellm_config_for_port
-from proxy_stack.claude_code_api_adapter import estimate_input_tokens, is_title_generation_request, model_catalog, normalize_model_request, title_generation_body, title_generation_sse
+from proxy_stack.claude_code_api_adapter import estimate_input_tokens, is_title_generation_request, model_catalog, normalize_model_request, proxy_anthropic, title_generation_body, title_generation_sse
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_PATH = ROOT / "claude-code-proxy" / "app.py"
@@ -97,6 +99,63 @@ def test_claude_code_api_adapter_generates_title_sse():
     assert "event: content_block_delta" in stream
     assert "<title>简单问候</title>" in stream
     assert "event: message_stop" in stream
+
+
+def test_claude_code_api_adapter_local_title_skips_memory_prefix():
+    payload = title_generation_payload(
+        "Contain information about the user's preferences and settings.\n"
+        "User: 你看现在名字全是 Contain information about the user s"
+    )
+    body = title_generation_body(payload, "claude-code-haiku")
+    assert "Contain information" not in body["content"][0]["text"]
+    assert "名字全是" in body["content"][0]["text"]
+
+
+def test_claude_code_api_adapter_title_generation_uses_upstream_first(monkeypatch):
+    calls = []
+
+    async def fake_body():
+        return json.dumps(title_generation_payload()).encode("utf-8")
+
+    class FakeRequest:
+        method = "POST"
+        headers = {"anthropic-version": "2023-06-01"}
+
+        async def body(self):
+            return await fake_body()
+
+    def fake_proxy_response(*args):
+        calls.append(args)
+        return JSONResponse({"content": [{"type": "text", "text": "<title>Model title</title>"}]})
+
+    monkeypatch.setattr("proxy_stack.claude_code_api_adapter.upstream_url", lambda path: f"https://upstream.test{path}")
+    monkeypatch.setattr("proxy_stack.claude_code_api_adapter.proxy_response_with_timeout", fake_proxy_response)
+    response = asyncio.run(proxy_anthropic("messages", FakeRequest(), None, "claude-code-api-local-key"))
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert b"claude-sonnet-4-6" in calls[0][3]
+
+
+def test_claude_code_api_adapter_title_generation_falls_back_on_upstream_failure(monkeypatch):
+    async def fake_body():
+        return json.dumps(title_generation_payload("User: 修复会话命名")).encode("utf-8")
+
+    class FakeRequest:
+        method = "POST"
+        headers = {"anthropic-version": "2023-06-01"}
+
+        async def body(self):
+            return await fake_body()
+
+    monkeypatch.setattr(
+        "proxy_stack.claude_code_api_adapter.proxy_response_with_timeout",
+        lambda *args: Response(content=b"upstream failed", status_code=503),
+    )
+    monkeypatch.setattr("proxy_stack.claude_code_api_adapter.upstream_url", lambda path: f"https://upstream.test{path}")
+    response = asyncio.run(proxy_anthropic("messages", FakeRequest(), None, "claude-code-api-local-key"))
+    assert response.status_code == 200
+    assert b"<title>" in response.body
+    assert "修复会话命名".encode() in response.body
 
 
 def test_claude_code_api_adapter_estimates_count_tokens_locally():

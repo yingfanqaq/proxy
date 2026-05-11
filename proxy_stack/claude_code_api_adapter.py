@@ -29,6 +29,7 @@ REQUEST_TIMEOUT = int(os.environ.get("CLAUDE_CODE_API_TIMEOUT", "900"))
 UPSTREAM_RETRIES = max(0, int(os.environ.get("CLAUDE_CODE_API_RETRIES", "2")))
 HAIKU_FALLBACK_MODEL = os.environ.get("CLAUDE_CODE_API_HAIKU_FALLBACK_MODEL", "claude-sonnet-4-6").strip()
 LOCAL_TITLE_GENERATION = os.environ.get("CLAUDE_CODE_API_LOCAL_TITLE_GENERATION", "1").strip().lower() not in {"0", "false", "no"}
+TITLE_GENERATION_TIMEOUT = int(os.environ.get("CLAUDE_CODE_API_TITLE_TIMEOUT", "25"))
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 EFFORT_ALIASES = {"minimal": "low"}
 MODEL_ALIASES = {
@@ -190,13 +191,62 @@ def extract_title_description(payload: dict[str, Any]) -> str:
     description = html.unescape(description)
     description = re.sub(r"<[^>]+>", " ", description)
     description = re.sub(r"```.*?```", " ", description, flags=re.DOTALL)
-    return re.sub(r"\s+", " ", description).strip()
+    description = re.sub(r"[ \t]+", " ", description)
+    description = re.sub(r"\n{3,}", "\n\n", description)
+    return description.strip()
 
 
-def local_title_from_description(description: str) -> str:
+def is_bad_title_candidate(value: str) -> bool:
+    compact = re.sub(r"\s+", " ", value).strip(" -:：,.，").lower()
+    if not compact:
+        return True
+    bad_prefixes = (
+        "contain information about the user",
+        "contains information about the user",
+        "information about the user",
+        "the user prefers",
+        "the user likes",
+        "the user is",
+        "memory about the user",
+        "user memory",
+        "system prompt",
+        "application details",
+        "claude behavior",
+    )
+    return any(compact.startswith(prefix) for prefix in bad_prefixes)
+
+
+def title_source_candidates(description: str) -> list[str]:
     text = description.strip()
     if not text:
-        return "New chat"
+        return []
+    candidates: list[str] = []
+    user_pattern = re.compile(
+        r"(?:^|\n)\s*(?:user|human|用户|用户消息|initial user message|user message)\s*[:：]\s*(.+?)(?=\n\s*(?:assistant|claude|system|user|human|助手|系统|用户)\s*[:：]|\Z)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    candidates.extend(match.strip() for match in reversed(user_pattern.findall(text)))
+    candidates.extend(line.strip() for line in text.splitlines())
+    candidates.extend(part.strip() for part in re.split(r"[。！？!?；;]+", text))
+    candidates.append(text)
+    unique: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        candidate = re.sub(r"\s+", " ", candidate).strip(" -:：,.，")
+        candidate = re.sub(r"\bcontains? information about the user'?s?.*$", "", candidate, flags=re.IGNORECASE).strip(" -:：,.，")
+        if not candidate or is_bad_title_candidate(candidate):
+            continue
+        key = candidate.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
+
+
+def compact_title_from_candidate(candidate: str) -> str:
+    text = candidate.strip()
+    if not text:
+        return ""
     text = re.sub(r"^(please|can you|could you|help me|let'?s)\s+", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^(请你|请|帮我|麻烦|可以|你看|我想|我希望|接下来|关于)", "", text).strip()
     first_sentence = re.split(r"[。！？!?；;\n\r]+", text, 1)[0].strip(" -:：,.，")
@@ -216,6 +266,14 @@ def local_title_from_description(description: str) -> str:
     if len(words) == 1 and words[0].lower() in {"hi", "hello", "hey"}:
         return "Quick greeting"
     return " ".join(words[:6])
+
+
+def local_title_from_description(description: str) -> str:
+    for candidate in title_source_candidates(description):
+        title = compact_title_from_candidate(candidate)
+        if title and not is_bad_title_candidate(title):
+            return title
+    return "New chat"
 
 
 def title_generation_body(payload: dict[str, Any], model: str) -> dict[str, Any]:
@@ -256,6 +314,11 @@ def title_generation_sse(body: dict[str, Any]) -> str:
         ("message_stop", {"type": "message_stop"}),
     ]
     return "".join(f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n" for event, data in events)
+
+
+def is_upstream_failure(response: Response) -> bool:
+    status_code = getattr(response, "status_code", 0) or 0
+    return int(status_code) >= 500
 
 
 def require_auth(authorization: str | None, x_api_key: str | None) -> None:
@@ -325,11 +388,15 @@ def upstream_headers(request: Request, json_body: bool) -> dict[str, str]:
 
 
 def proxy_response(url: str, method: str, headers: dict[str, str], body: bytes | None, stream: bool, request_id: str = "-") -> Response:
+    return proxy_response_with_timeout(url, method, headers, body, stream, REQUEST_TIMEOUT, request_id)
+
+
+def proxy_response_with_timeout(url: str, method: str, headers: dict[str, str], body: bytes | None, stream: bool, timeout: int, request_id: str = "-") -> Response:
     last_error: urllib.error.URLError | None = None
     for attempt in range(UPSTREAM_RETRIES + 1):
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
-            resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
+            resp = urllib.request.urlopen(req, timeout=timeout)
         except urllib.error.HTTPError as exc:
             raw = exc.read()
             LOGGER.info(
@@ -432,6 +499,8 @@ async def proxy_anthropic(path: str, request: Request, authorization: str | None
     stream = False
     model_raw = ""
     model = ""
+    payload: dict[str, Any] | None = None
+    title_generation = False
     if method == "POST" and path == "messages" and raw_body:
         try:
             payload = json.loads(raw_body.decode("utf-8"))
@@ -443,33 +512,7 @@ async def proxy_anthropic(path: str, request: Request, authorization: str | None
             model = str(payload.get("model") or "")
             stream = bool(payload.get("stream"))
             if is_title_generation_request(payload):
-                body = title_generation_body(payload, model_raw or model)
-                LOGGER.info(
-                    "adapter_request id=%s phase=request_start method=%s path=/v1/%s stream=%s model_raw=%s model=%s body_bytes=%s local_title_generation=true",
-                    request_id,
-                    method,
-                    path,
-                    stream,
-                    model_raw,
-                    model,
-                    len(raw_body or b""),
-                )
-                LOGGER.info(
-                    "adapter_request id=%s phase=local_title_generation model_raw=%s model=%s title_chars=%s",
-                    request_id,
-                    model_raw,
-                    model,
-                    len(body["content"][0]["text"]),
-                )
-                LOGGER.info(
-                    "adapter_request id=%s phase=request_done elapsed_ms=%s status=200 path=/v1/%s",
-                    request_id,
-                    elapsed_ms(start_ms),
-                    path,
-                )
-                if stream:
-                    return Response(content=title_generation_sse(body), status_code=200, media_type="text/event-stream")
-                return JSONResponse(body)
+                title_generation = True
             raw_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     LOGGER.info(
         "adapter_request id=%s phase=request_start method=%s path=/v1/%s stream=%s model_raw=%s model=%s body_bytes=%s",
@@ -481,15 +524,25 @@ async def proxy_anthropic(path: str, request: Request, authorization: str | None
         model,
         len(raw_body or b""),
     )
+    upstream_timeout = TITLE_GENERATION_TIMEOUT if title_generation else REQUEST_TIMEOUT
     response = await asyncio.to_thread(
-        proxy_response,
+        proxy_response_with_timeout,
         upstream_url(f"/v1/{path}"),
         method,
         upstream_headers(request, bool(raw_body)),
         raw_body or None,
         stream,
+        upstream_timeout,
         request_id,
     )
+    if title_generation and payload is not None and is_upstream_failure(response):
+        LOGGER.warning(
+            "adapter_request id=%s phase=title_generation_upstream_failed status=%s fallback=local",
+            request_id,
+            getattr(response, "status_code", ""),
+        )
+        body = title_generation_body(payload, model_raw or model)
+        response = Response(content=title_generation_sse(body), status_code=200, media_type="text/event-stream") if stream else JSONResponse(body)
     LOGGER.info(
         "adapter_request id=%s phase=request_done elapsed_ms=%s status=%s path=/v1/%s",
         request_id,
